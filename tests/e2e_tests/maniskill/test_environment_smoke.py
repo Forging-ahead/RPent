@@ -24,6 +24,7 @@ from rpent.utils.logging import init_output_dir  # noqa: E402
 
 def test_pick_cube_uses_rlinf_env():
     from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
+
     from robots.rl.maniskill import _make_env
 
     env, task = _make_env("PickCube-v1", None, 1, seed=7)
@@ -37,6 +38,55 @@ def test_pick_cube_uses_rlinf_env():
         assert bool(truncated)
         assert int(info["episode"]["episode_len"]) == 1
         assert float(info["episode"]["return"]) == pytest.approx(float(reward))
+
+
+@pytest.mark.parametrize(
+    "env_id",
+    [
+        "DrawTriangle-v1",
+        "DrawSVG-v1",
+        "FMBAssembly1Easy-v1",
+        "UnitreeG1Stand-v1",
+        "UnitreeH1Stand-v1",
+    ],
+)
+def test_native_boolean_reward_environment(env_id):
+    from robots.rl.maniskill import _make_env
+
+    env, _ = _make_env(env_id, None, 2)
+    with contextlib.closing(env):
+        env.reset()
+        for _ in range(2):
+            _, reward, _, _, info = env.step(env.action_space.sample())
+            assert reward.dtype.is_floating_point
+            assert math.isfinite(float(info["episode"]["return"]))
+
+
+@pytest.mark.parametrize("horizon", [None, 3])
+def test_fetch_base_and_lift_use_effective_episode_budget(tmp_path, horizon):
+    from robots.rl.maniskill import ManiSkillPrimitives
+    from rpent.session import EnvState
+
+    init_output_dir(tmp_path)
+    sim = ManiSkillPrimitives(
+        task_name="SceneManipulation-v1",
+        seed=0,
+        state=EnvState(tmp_path),
+        check_cancelled=lambda: None,
+        max_episode_steps=horizon,
+    )
+    with contextlib.closing(sim.env):
+        before = sim.env_steps
+        base = sim.move_base(vx=0.1, duration_s=0.6).data
+        assert base["executed_steps"] > 0
+        assert sim.env_steps > before
+        if horizon is not None:
+            assert sim.env_steps == horizon
+            assert sim.truncated
+        else:
+            assert base["displacement_initial_base_m"][0] > 0.01
+            lift = sim.move_lift(delta_m=-0.02, duration_s=1).data
+            assert abs(lift["height_error_m"]) <= 0.004
 
 
 @pytest.mark.parametrize("env_id", sorted(REGISTERED_ENVS))

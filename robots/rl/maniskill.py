@@ -162,7 +162,9 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                 self._lift_index = [
                     joint.name for joint in arm.parts["body"].joints
                 ].index("torso_lift_joint")
-                self._max_episode_steps = self.env.spec.max_episode_steps
+                self._max_episode_steps = (
+                    self.env.cfg.init_params.max_episode_steps or float("inf")
+                )
                 base = arm.parts["base"]._original_single_action_space
                 body = arm.parts["body"]._original_single_action_space
                 self._meta = {
