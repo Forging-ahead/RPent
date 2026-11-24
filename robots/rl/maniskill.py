@@ -11,7 +11,9 @@ from typing import Any
 
 import numpy as np
 
+from robots.rl.coordinates import Coordinates
 from robots.rl.geometry import world_from_depth
+from robots.rl.maniskill_arm import ManiSkillArm, UnsupportedRobotPolicy, transform
 from robots.rl.perception import RecordedPerception
 from robots.rl.tools import ControlConfig
 from rpent.session import EnvState, StepRecord
@@ -29,7 +31,6 @@ def _make_env(task_name: str, render_device: int | None, max_episode_steps: int 
     import gymnasium as gym
     import mani_skill.envs  # noqa: F401 - imports native task registrations
     from mani_skill.utils.registration import REGISTERED_ENVS
-    from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
     from mani_skill.utils.wrappers.gymnasium import CPUGymWrapper
 
     env_id = "PickCube-v1" if task_name == "pick_cube" else task_name
@@ -61,65 +62,10 @@ def _make_env(task_name: str, render_device: int | None, max_episode_steps: int 
         ) from e
     try:
         env = CPUGymWrapper(env, record_metrics=True)
-        if isinstance(env.action_space, gym.spaces.Dict):
-            env = FlattenActionSpaceWrapper(env)
         return env, env_id
     except BaseException:
         env.close()
         raise
-
-
-def _bounds(values: np.ndarray) -> list[float | None]:
-    """Keep unbounded action dimensions representable in JSON."""
-    return [float(v) if np.isfinite(v) else None for v in values]
-
-
-def _action_description(env) -> dict:
-    """Describe the actual Gym space and the ordering used by the native controllers."""
-    agent = env.unwrapped.agent
-    controllers = getattr(agent, "agents_dict", None)
-    if controllers is None:
-        ordered = [(agent.uid, agent)]
-    else:
-        ordered = [
-            (name, controllers[name])
-            for name in env.unwrapped.single_action_space.spaces
-        ]
-    parts = []
-    offset = 0
-    for robot, owner in ordered:
-        controller = owner.controller
-        width = owner.single_action_space.shape[0]
-        groups = getattr(controller, "action_mapping", {"action": (0, width)})
-        for group, (begin, end) in groups.items():
-            if begin == end:
-                continue
-            component = getattr(controller, "controllers", {}).get(group, controller)
-            part = {
-                "robot": robot,
-                "group": group,
-                "slice": [offset + begin, offset + end],
-                "controller": type(component).__name__,
-                "joints": [joint.name for joint in component.joints],
-            }
-            for key in ("normalize_action", "use_delta", "use_target", "frame"):
-                if hasattr(component.config, key):
-                    part[key] = getattr(component.config, key)
-            original_space = getattr(component, "_original_single_action_space", None)
-            if original_space is not None:
-                part["controller_low"] = _bounds(original_space.low)
-                part["controller_high"] = _bounds(original_space.high)
-            parts.append(part)
-        offset += width
-    space = env.action_space
-
-    return {
-        "shape": list(space.shape),
-        "low": _bounds(space.low),
-        "high": _bounds(space.high),
-        "control_mode": agent.control_mode,
-        "components": parts,
-    }
 
 
 class ManiSkillPrimitives(RecordedPerception):
@@ -151,8 +97,34 @@ class ManiSkillPrimitives(RecordedPerception):
             self.episode_return = 0.0
             self.reward = None
             self.terminated = self.truncated = False
-            self.action_spec = _action_description(self.env)
             native = self.env.unwrapped
+            group = getattr(native.agent, "agents_dict", None)
+            self.dual_arm = group is not None
+            if self.dual_arm:
+                if (
+                    len(group) != 2
+                    or not hasattr(native, "left_agent")
+                    or not hasattr(native, "right_agent")
+                ):
+                    raise UnsupportedRobotPolicy(
+                        f"{self.env_id} needs a physical arm mapping"
+                    )
+                self.arms = {
+                    side: ManiSkillArm(self, getattr(native, f"{side}_agent"))
+                    for side in ("left", "right")
+                }
+                self.agent_keys = {
+                    side: next(k for k, v in group.items() if v is arm.agent)
+                    for side, arm in self.arms.items()
+                }
+            else:
+                self.arms = {"arm": ManiSkillArm(self, native.agent)}
+            self.has_gripper = all(arm.has_gripper for arm in self.arms.values())
+            table = getattr(getattr(native, "table_scene", None), "table", None)
+            mesh = table.get_first_collision_mesh() if table is not None else None
+            self.table_z = None if mesh is None else float(mesh.bounds[1, 2])
+            self._refresh_coordinates()
+            state.save("coordinates.json", self.coordinates.metadata(), step=None)
             instruction = getattr(native, "get_language_instruction", None)
             if instruction is not None:
                 value = instruction()
@@ -203,46 +175,61 @@ class ManiSkillPrimitives(RecordedPerception):
         return self._verdict("fail")
 
     def robot_state(self) -> dict:
-        """Only expose policy observation fields, never simulator or evaluation ground truth."""
-        return _json(
-            {
-                name: value
-                for name, value in self._obs.items()
-                if name not in {"sensor_data", "sensor_param"}
-            }
+        states = {}
+        for name, arm in self.arms.items():
+            measured = arm.measure().state()
+            if not arm.has_gripper:
+                measured.pop("opening")
+            states[name] = measured
+        return states if self.dual_arm else states["arm"]
+
+    def _refresh_coordinates(self):
+        mounts = [transform(arm.mount.pose) for arm in self.arms.values()]
+        origin = np.mean([m[:3, 3] for m in mounts], axis=0)
+        up = np.array([0.0, 0.0, 1.0])
+        if self.dual_arm:
+            forward = np.cross(mounts[0][:3, 3] - mounts[1][:3, 3], up)
+        else:
+            forward = mounts[0][:3, 0].copy()
+        forward[2] = 0
+        if np.linalg.norm(forward) < 1e-6:
+            raise ValueError("Cannot determine horizontal arm mounting frame")
+        forward /= np.linalg.norm(forward)
+        coords = Coordinates(
+            origin,
+            np.column_stack((forward, np.cross(up, forward), up)),
+            table_height_m=None if self.table_z is None else self.table_z - origin[2],
+            tcp="native_grasp_tcp" if self.has_gripper else "native_tool_tip",
+        )
+        self.coordinates = (
+            coords.after(self.coordinates) if hasattr(self, "coordinates") else coords
         )
 
-    def validate_action(self, action) -> np.ndarray:
-        values = np.asarray(action)
-        space = self.env.action_space
-        if values.shape != space.shape or values.dtype.kind not in "fiu":
-            raise ValueError(f"Expected {space.shape[0]} real controller inputs")
-        if (
-            not np.isfinite(values).all()
-            or np.any(values < space.low)
-            or np.any(values > space.high)
-        ):
-            raise ValueError(
-                "Controller inputs must be finite and within the native action bounds"
-            )
-        return values.astype(space.dtype)
+    def move_to(self, *, arm="arm", **target):
+        return self.arms[arm].move_to(**target)
 
-    def step_action(self, action) -> None:
+    def set_gripper(self, *, opening, arm="arm"):
+        return self.arms[arm].set_gripper(opening=opening)
+
+    def step_controllers(self) -> None:
         self._check_cancelled()
         if self.ended:
             raise RuntimeError("ManiSkill episode has ended")
-        obs, reward, terminated, truncated, info = self.env.step(
-            self.validate_action(action)
-        )
+        # Explicit batch dimensions remain valid after an official control-mode switch.
+        if self.dual_arm:
+            action = {
+                self.agent_keys[k]: arm.last[None, :] for k, arm in self.arms.items()
+            }
+        else:
+            action = self.arms["arm"].last[None, :]
+        obs, reward, terminated, truncated, info = self.env.step(action)
         self._obs, self._info = obs, info
         self.terminated, self.truncated = bool(terminated), bool(truncated)
         self.reward = float(reward)
         self.episode_return = float(info["episode"]["return"])
         self.env_steps = int(info["episode"]["episode_len"])
 
-    @staticmethod
-    def _model_points(world: np.ndarray) -> np.ndarray:
-        return world
+        self._refresh_coordinates()
 
     def _save(self, name: str, value: Any, step: int) -> None:
         if self._state.save(name, value, step=step) is None:
@@ -270,6 +257,7 @@ class ManiSkillPrimitives(RecordedPerception):
             truncated=self.truncated,
             extras=extras,
         ) as step:
+            self._save("step_coordinates.json", self.coordinates.metadata(), step)
             for i, camera in enumerate(self.cameras):
                 data = self._obs["sensor_data"][camera]
                 rgb = data["rgb"]

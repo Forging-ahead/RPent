@@ -276,11 +276,11 @@ def test_remote_maniskill_negotiates_native_action_and_camera_tools(connected):
         assert ("view_env" in {tool.name for tool in client.list_tools()}) == bool(
             capabilities["rgb_cameras"]
         )
-        action = [0.0] * capabilities["action_shape"][0]
+        action = {"action": "move_to", "xyz": [10, 0, 30]}
         result = client.execute_tool("execute_actions", {"actions": [action]})
         assert not result.is_error
         assert client.native_outcome() == connected.toolkit.native_outcome()
-        assert client.native_outcome()["episode_return"] == 2.0
+        assert client.native_outcome()["episode_return"] == 4.0
     finally:
         client.close()
     assert connected.bridge.released

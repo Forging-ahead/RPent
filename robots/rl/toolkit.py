@@ -68,36 +68,37 @@ def episode_tools(
     from robots.rl.actions import (
         ActionBatch,
         DualArmBatch,
-        ManiSkillActionBatch,
         MobileBatch,
+        ToolTipBatch,
     )
     from robots.rl.contracts import coordinate_definition, strict_tool
     from robots.rl.units import model_tool
 
     owner = RecordedPerception if perception is None else perception
     if environment == "maniskill":
-        rgb = capabilities["rgb_cameras"]
-        depth = capabilities["depth_cameras"]
+        rgb, depth = capabilities["rgb_cameras"], capabilities["depth_cameras"]
+        views = []
         if rgb:
-            yield strict_tool(owner.view_env, cameras=rgb)
+            views.append((owner.view_env, rgb))
             if capabilities["segment"]:
-                yield strict_tool(owner.segment, cameras=rgb)
+                views.append((owner.segment, rgb))
         if depth:
-            yield strict_tool(owner.back_project, cameras=depth)
-        batch = ManiSkillActionBatch(toolkit).execute_actions
-        schema = batch.input_schema
-        vectors = schema["properties"]["actions"]
-        vectors["maxItems"] = max_actions
-        (dimension,) = capabilities["action_shape"]
-        vectors["items"].update(minItems=dimension, maxItems=dimension)
-        yield strict_tool(replace(batch, _input_schema=schema, action_source="direct"))
-        return
-    batch_type = {
-        "libero": ActionBatch,
-        "robocasa": MobileBatch,
-        "robotwin": DualArmBatch,
-        "robodojo": DualArmBatch,
-    }[environment]
+            views.append((owner.back_project, depth))
+        batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
+        if not capabilities["gripper"]:
+            batch_type = ToolTipBatch
+    else:
+        cameras = CAMERAS[environment]
+        views = [
+            (tool, cameras)
+            for tool in (owner.view_env, owner.segment, owner.back_project)
+        ]
+        batch_type = {
+            "libero": ActionBatch,
+            "robocasa": MobileBatch,
+            "robotwin": DualArmBatch,
+            "robodojo": DualArmBatch,
+        }[environment]
     batch = batch_type(toolkit).execute_actions
     schema = batch.input_schema
     schema["properties"]["actions"]["maxItems"] = max_actions
@@ -106,11 +107,11 @@ def episode_tools(
         _input_schema=schema,
         description=batch.description.replace("1..K", f"1..{max_actions}"),
     )
-    for declaration in (owner.view_env, owner.segment, owner.back_project, batch):
+    for declaration, cameras in [*views, (batch, ())]:
         yield model_tool(
             strict_tool(
                 coordinate_definition(declaration),
-                cameras=CAMERAS[environment],
+                cameras=cameras,
             ),
         )
 
@@ -161,7 +162,8 @@ class RLToolkit(Toolkit):
                     "rgb_cameras": list(native.cameras),
                     "depth_cameras": list(native.depth_cameras),
                     "segment": bool(native.cameras) and native._sam3 is not None,
-                    "action_shape": list(native.action_spec["shape"]),
+                    "dual_arm": native.dual_arm,
+                    "gripper": native.has_gripper,
                 }
             else:
                 if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
@@ -191,8 +193,6 @@ class RLToolkit(Toolkit):
         return getattr(getattr(self._primitives, "coordinates", None), "version", 0)
 
     def _model_feedback(self, result: ToolResult) -> ToolResult:
-        if self.environment == "maniskill":
-            return result
         result.data["coordinates"] = self._primitives.coordinates.description()
         result.data = CENTIMETERS.payload(result.data)
         result.data["position_unit"] = "cm"
@@ -257,7 +257,6 @@ class RLToolkit(Toolkit):
             },
         )
         if self.environment == "maniskill":
-            observation.data["action_space"] = self._primitives.action_spec
             observation.data["sensors"] = self.tool_capabilities
         observation = self._model_feedback(observation)
         self._count_images(observation)
@@ -298,9 +297,16 @@ class RLToolkit(Toolkit):
         except (ValueError, TypeError) as exc:
             from robots.rl.contracts import argument_hint
 
+            hint = argument_hint(name, self.environment)
+            if (
+                self.environment == "maniskill"
+                and name == "execute_actions"
+                and not self.tool_capabilities["gripper"]
+            ):
+                hint = "This robot accepts move_to with xyz, orientation_rpy, or both."
             return ToolResult(
                 data={"error": str(exc)},
-                model_text=f"Invalid {name} arguments: {exc}. {argument_hint(name, self.environment)} No tool executed; correct the arguments and try again.",
+                model_text=f"Invalid {name} arguments: {exc}. {hint} No tool executed; correct the arguments and try again.",
             )
         result = self._execute_validated(declaration, input_dict, arguments)
         if self.solved() and self._native_success_seconds is None:
@@ -432,14 +438,11 @@ class RLToolkit(Toolkit):
     def _save_rollout(self) -> None:
         if self._primitives.frames:
             self._state.save("episode.mp4", self._primitives.frames, step=None, fps=20)
-        contract = (
-            self.native_outcome()
-            if self.environment == "maniskill"
-            else {
-                "position_unit": "cm",
-                "coordinate_contract": "episode_coordinates_v2",
-            }
-        )
+        contract = {
+            "position_unit": "cm",
+            "coordinate_contract": "episode_coordinates_v2",
+            **self.native_outcome(),
+        }
         self._state.save(
             "rollout.json",
             {

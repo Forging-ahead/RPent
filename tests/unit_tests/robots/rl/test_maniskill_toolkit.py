@@ -36,7 +36,7 @@ class ExampleManiSkillEnv(NativeEpisode):
         return self.obs, {}
 
     def step(self, action):
-        self.received.append(action)
+        self.apply(action)
         self.obs["agent"] = {"qpos": action.tolist()}
         count = len(self.received)
         info = {"fail": False, "episode": {"return": 2.0 * count, "episode_len": count}}
@@ -84,11 +84,16 @@ def test_tools_match_policy_sensors_and_segment_service(
         tools = {tool.name: tool for tool in kit.list_tools()}
         assert set(tools) == {"execute_actions"} | perception
         initial = kit.initial_observation().data
-        assert initial["state"]["agent"]["qpos"] == [0, 0]
-        assert initial["action_space"]["shape"] == [2]
+        assert initial["state"]["pose"]["xyz"] == [0, 0, 30]
+        assert "action_space" not in initial
         schema = tools["execute_actions"].input_schema["properties"]["actions"]
         assert schema["minItems"] == 1 and schema["maxItems"] == 3
-        assert schema["items"]["minItems"] == schema["items"]["maxItems"] == 2
+        from robots.rl.toolkit import episode_tools
+
+        libero = next(
+            t for t in episode_tools(kit, "libero", 3) if t.name == "execute_actions"
+        )
+        assert tools["execute_actions"].input_schema == libero.input_schema
         if "view_env" in perception:
             view = kit.execute_tool("view_env", {"camera": "cam0"})
             assert len(view.images) == 1
@@ -99,8 +104,8 @@ def test_tools_match_policy_sensors_and_segment_service(
             assert mask.data["world_xyz"] is None
         if "back_project" in perception:
             point = kit.execute_tool("back_project", {"pixel": [0, 0], "step": 0})
-            assert point.data["world_xyz"] == pytest.approx([0, 0, 1])
-            assert point.data["position_unit"] == "m"
+            assert point.data["world_xyz"] == pytest.approx([-100, 0, 100])
+            assert point.data["position_unit"] == "cm"
         assert not env.received
     finally:
         kit.close()
@@ -115,15 +120,24 @@ def test_validate_entire_batch_and_stop_at_native_end(tmp_path, monkeypatch, tru
             assert kit.execute_tool("execute_actions", {"actions": invalid}).is_error
         assert not env.received
         result = kit.execute_tool(
-            "execute_actions", {"actions": [[0.5, -0.5], [-1, 0], [0, 0]]}
+            "execute_actions",
+            {
+                "actions": [
+                    {"action": "move_to", "xyz": [10, 0, 30]},
+                    {"action": "set_gripper", "opening": 0},
+                ]
+            },
         )
-        assert result.data["executed_count"] == 2
-        assert result.data["terminated"] is not truncate
-        assert result.data["truncated"] is truncate
+        assert result.data["executed_count"] == 1
+        receipt = result.data["results"][0]
+        assert receipt["terminated"] is not truncate
+        assert receipt["truncated"] is truncate
+        assert receipt["status"] == "partial"
+        assert receipt["env_steps"] == 2
         for receipt in [result.data, *result.data["results"]]:
             assert {"reward", "episode_return", "success", "fail"}.isdisjoint(receipt)
-        np.testing.assert_array_equal(env.received, [[0.5, -0.5], [-1, 0]])
-        assert result.data["state"]["agent"]["qpos"] == [-1.0, 0.0]
+        np.testing.assert_allclose([a[0, 0] for a in env.received], [0.03, 0.06])
+        assert result.data["final_state"]["pose"]["xyz"] == [6.0, 0.0, 30.0]
         expected = {
             "success": None,
             "fail": False,
@@ -133,12 +147,118 @@ def test_validate_entire_batch_and_stop_at_native_end(tmp_path, monkeypatch, tru
         }
         assert kit.native_outcome() == expected
         assert kit.completion_result() == {"status": "completed", **expected}
-        assert kit.state.latest_step == 2
+        assert kit.state.latest_step == 1
         extras = kit.state.latest_record().extras
         assert {key: extras[key] for key in expected} == expected
     finally:
         kit.close()
     assert env.closed
     rollout = json.loads((tmp_path / "episode" / "rollout.json").read_text())
-    assert rollout["observations"] == 3 and rollout["env_steps"] == 2
+    assert rollout["observations"] == 2 and rollout["env_steps"] == 2
     assert {key: rollout[key] for key in expected} == expected
+
+
+def test_drawing_arm_keeps_the_pose_tool_and_omits_gripper(tmp_path, monkeypatch):
+    env = ExampleManiSkillEnv(camera_mode="state")
+    agent = env.unwrapped.agent
+    agent.gripper_joint_names = []
+    del agent.controller.controllers["gripper"]
+    del agent.controller.action_mapping["gripper"]
+    kit = make_toolkit(tmp_path, monkeypatch, env)
+    try:
+        state = kit.initial_observation().data
+        assert state["coordinates"]["tcp"] == "native_tool_tip"
+        assert "opening" not in state["state"]
+        assert kit.execute_tool(
+            "execute_actions", {"actions": [{"action": "set_gripper", "opening": 1}]}
+        ).is_error
+        assert not env.received
+        result = kit.execute_tool(
+            "execute_actions", {"actions": [{"action": "move_to", "xyz": [0, 0, 36]}]}
+        )
+        assert result.data["executed_count"] == 1
+        assert len(env.received) == 2
+        assert result.data["final_state"]["pose"]["xyz"] == [0.0, 0.0, 36.0]
+    finally:
+        kit.close()
+
+
+def test_gripper_target_persists_during_a_later_move(tmp_path, monkeypatch):
+    env = ExampleManiSkillEnv(camera_mode="state")
+
+    def step(action):
+        env.apply(action)
+        return (
+            env.obs,
+            0.0,
+            False,
+            False,
+            {
+                "success": False,
+                "episode": {"return": 0.0, "episode_len": len(env.received)},
+            },
+        )
+
+    env.step = step
+    kit = make_toolkit(tmp_path, monkeypatch, env)
+    try:
+        result = kit.execute_tool(
+            "execute_actions",
+            {
+                "actions": [
+                    {"action": "set_gripper", "opening": 0.25},
+                    {"action": "move_to", "xyz": [6, 0, 30]},
+                ]
+            },
+        )
+        assert result.data["executed_count"] == 2
+        assert all(item["status"] == "reached" for item in result.data["results"])
+        assert result.data["final_state"]["opening"] == 0.25
+        assert result.data["final_state"]["pose"]["xyz"] == [6.0, 0.0, 30.0]
+        assert len(env.received) > 2
+        np.testing.assert_allclose([a[0, 6] for a in env.received], -0.5, atol=1e-6)
+    finally:
+        kit.close()
+
+
+def test_dual_arm_uses_native_labels_and_holds_idle_arm(tmp_path, monkeypatch):
+    env = ExampleManiSkillEnv(camera_mode="state")
+    other = ExampleManiSkillEnv(camera_mode="state")
+    left, right = env.unwrapped.agent, other.unwrapped.agent
+    for sign, agent in [(1, left), (-1, right)]:
+        agent.robot.root.pose.p[1] = sign * 0.2
+        agent.tcp.pose.p[1] = sign * 0.2
+    env.unwrapped.left_agent, env.unwrapped.right_agent = left, right
+    from types import SimpleNamespace
+
+    env.unwrapped.agent = SimpleNamespace(agents_dict={"second": right, "first": left})
+
+    def step(actions):
+        env.received.append(actions)
+        left.tcp.pose.p[:] = left.robot.root.pose.p + actions["first"][0, :3]
+        right.tcp.pose.p[:] = right.robot.root.pose.p + actions["second"][0, :3]
+        return (
+            env.obs,
+            0.0,
+            False,
+            False,
+            {"episode": {"return": 0.0, "episode_len": len(env.received)}},
+        )
+
+    env.step = step
+    kit = make_toolkit(tmp_path, monkeypatch, env)
+    try:
+        assert kit.initial_observation().data["state"]["left"]["pose"]["xyz"] == [
+            0.0,
+            20.0,
+            30.0,
+        ]
+        result = kit.execute_tool(
+            "execute_actions",
+            {"actions": [{"action": "move_to", "arm": "right", "xyz": [6, -20, 30]}]},
+        )
+        assert result.data["results"][0]["status"] == "reached"
+        assert result.data["final_state"]["left"]["pose"]["xyz"] == [0.0, 20.0, 30.0]
+        assert result.data["final_state"]["right"]["pose"]["xyz"] == [6.0, -20.0, 30.0]
+    finally:
+        kit.close()

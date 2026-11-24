@@ -25,13 +25,6 @@ def system_prompt(variables: Mapping[str, object] | None = None) -> str:
     variables = variables or {}
     environment = variables.get("environment", "libero")
     prompts = Path(__file__).parent / "prompts"
-    if environment == "maniskill":
-        prompt = (prompts / "maniskill_general.md").read_text().strip()
-        if not variables.get("reasoning", True):
-            prompt += (
-                "\nCall the next tool directly without reasoning or explanatory text."
-            )
-        return prompt
     names = ("general.md", f"{environment}_general.md", "episode.md")
     sections = [(prompts / name).read_text().strip() for name in names]
     if not variables.get("reasoning", True):

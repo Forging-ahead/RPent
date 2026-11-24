@@ -81,62 +81,11 @@ class Measurement:
         }
 
 
-class LiberoRLPrimitives(RecordedPerception):
-    """Servo one LIBERO arm from measured state and query recorded RGB-D views."""
-
-    cameras = tuple(SIM_CAMERAS)
-
-    def __init__(
-        self,
-        *,
-        env: LiberoEnvClient,
-        sam3_client: Sam3Client | None = None,
-        state: EnvState,
-        check_cancelled: Callable[[], None],
-        config: ControlConfig = ControlConfig(),
-        capture_geometry: bool = True,
-    ) -> None:
-        self.env = env
-        self._sam3 = sam3_client
-        self._state = state
-        self._check_cancelled = check_cancelled
-        self._config = config
-        from robots.rl.coordinates import Coordinates, grasp_axes
-
-        control = env.last_obs["control_state"]
-        self.coordinates = Coordinates.from_control(control)
-        self.tool_rotation = grasp_axes(
-            control["jaw_slide_axes_site"][0], control["wrist_to_site_in_site"]
-        )
-        self.capture_geometry = capture_geometry
-        self._state.save("coordinates.json", self.coordinates.metadata(), step=None)
-        # The client resets on connect, leaving the gripper fully open.
-        self._open_gap = self._finger_gap()
-        self.env_steps = 0
-        self.frames = [np.asarray(env.last_obs["main_images"])]
-        self._masks: dict[str, tuple[int, str, np.ndarray]] = {}
-        self._mask_ids = itertools.count(1)
-        self._sam_calls = itertools.count(1)
-
-    @property
-    def ended(self) -> bool:
-        return self.env.terminated or self.env.truncated
-
-    def _finger_gap(self) -> float:
-        states = np.asarray(self.env.last_obs["states"], dtype=np.float64)
-        return float(abs(states[6]) + abs(states[7]))
-
-    def _measure_native(self) -> Measurement:
-        """Read the native control site without changing the OSC reference."""
-        control = self.env.last_obs["control_state"]
-        return Measurement(
-            xyz=np.asarray(control["xyz"], dtype=np.float64),
-            rotation=np.asarray(control["rotation"], dtype=np.float64),
-            opening=min(1.0, self._finger_gap() / self._open_gap),
-        )
+class CartesianServo:
+    """Shared measured move and gripper loops over a simulator's control inputs."""
 
     def _tcp_world(self, current: Measurement) -> np.ndarray:
-        """LIBERO uses its native grasp site."""
+        """Return the measured world position of the controlled TCP."""
         return current.xyz
 
     def measure(self) -> Measurement:
@@ -154,50 +103,6 @@ class LiberoRLPrimitives(RecordedPerception):
         """Compensate the measured TCP offset at the requested target rotation."""
         offset = current.rotation.T @ (self._tcp_world(current) - current.xyz)
         return xyz - rotation @ offset
-
-    def _step(self, action: np.ndarray) -> None:
-        self._check_cancelled()
-        self.env.step(action)
-        self.env_steps += 1
-        self.frames.append(np.asarray(self.env.last_obs["main_images"]))
-
-    def _pose_action(
-        self, current: Measurement, xyz: np.ndarray, rotation: np.ndarray
-    ) -> tuple[np.ndarray, float, float]:
-        """Return one bounded servo action and the remaining pose errors."""
-        position_error = xyz - current.xyz
-        rotation_error = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
-        action = np.zeros(7)
-        control = self.env.last_obs["control_state"]
-        frame = np.asarray(control["control_to_world_rotation"], dtype=np.float64)
-        delta = np.concatenate(
-            [
-                frame.T @ _clip_norm(position_error, self._config.position_step_m),
-                frame.T @ _clip_norm(rotation_error, self._config.rotation_step_rad),
-            ]
-        )
-        low, high = np.asarray(control["output_min"]), np.asarray(control["output_max"])
-        input_low, input_high = (
-            np.asarray(control["input_min"]),
-            np.asarray(control["input_max"]),
-        )
-        if np.any(high <= low):
-            raise ValueError("native OSC controller has invalid output bounds")
-        action[:6] = (delta - (high + low) / 2) * (input_high - input_low) / (
-            high - low
-        ) + (input_high + input_low) / 2
-        if np.any(action[:6] < input_low - 1e-8) or np.any(
-            action[:6] > input_high + 1e-8
-        ):
-            raise ValueError("servo step exceeds the native controller bounds")
-        return (
-            action,
-            float(np.linalg.norm(position_error)),
-            float(np.linalg.norm(rotation_error)),
-        )
-
-    def _ended_reason(self) -> str:
-        return "terminated" if self.env.terminated else "truncated"
 
     @tool(
         json_schema_extra={
@@ -276,7 +181,6 @@ class LiberoRLPrimitives(RecordedPerception):
                 reason = "stalled"
             if reason is not None:
                 break
-            # Gripper 0 keeps the last finger command.
             self._step(action)
         return ToolResult(
             data={
@@ -334,8 +238,7 @@ class LiberoRLPrimitives(RecordedPerception):
                 self._site_target(hold_xyz, hold.rotation, current),
                 hold.rotation,
             )
-            # Native gripper input: -1 opens, +1 closes, 0 keeps the command.
-            action[6] = 0.0 if within else float(-np.sign(error))
+            self._command_gripper(action, opening, error, within)
             self._step(action)
         return ToolResult(
             data={
@@ -345,6 +248,109 @@ class LiberoRLPrimitives(RecordedPerception):
                 "opening_error": round(error, 3),
             }
         )
+
+
+class LiberoRLPrimitives(CartesianServo, RecordedPerception):
+    """Servo one LIBERO arm from measured state and query recorded RGB-D views."""
+
+    cameras = tuple(SIM_CAMERAS)
+
+    def __init__(
+        self,
+        *,
+        env: LiberoEnvClient,
+        sam3_client: Sam3Client | None = None,
+        state: EnvState,
+        check_cancelled: Callable[[], None],
+        config: ControlConfig = ControlConfig(),
+        capture_geometry: bool = True,
+    ) -> None:
+        self.env = env
+        self._sam3 = sam3_client
+        self._state = state
+        self._check_cancelled = check_cancelled
+        self._config = config
+        from robots.rl.coordinates import Coordinates, grasp_axes
+
+        control = env.last_obs["control_state"]
+        self.coordinates = Coordinates.from_control(control)
+        self.tool_rotation = grasp_axes(
+            control["jaw_slide_axes_site"][0], control["wrist_to_site_in_site"]
+        )
+        self.capture_geometry = capture_geometry
+        self._state.save("coordinates.json", self.coordinates.metadata(), step=None)
+        # The client resets on connect, leaving the gripper fully open.
+        self._open_gap = self._finger_gap()
+        self.env_steps = 0
+        self.frames = [np.asarray(env.last_obs["main_images"])]
+        self._masks: dict[str, tuple[int, str, np.ndarray]] = {}
+        self._mask_ids = itertools.count(1)
+        self._sam_calls = itertools.count(1)
+
+    @property
+    def ended(self) -> bool:
+        return self.env.terminated or self.env.truncated
+
+    def _finger_gap(self) -> float:
+        states = np.asarray(self.env.last_obs["states"], dtype=np.float64)
+        return float(abs(states[6]) + abs(states[7]))
+
+    def _measure_native(self) -> Measurement:
+        """Read the native control site without changing the OSC reference."""
+        control = self.env.last_obs["control_state"]
+        return Measurement(
+            xyz=np.asarray(control["xyz"], dtype=np.float64),
+            rotation=np.asarray(control["rotation"], dtype=np.float64),
+            opening=min(1.0, self._finger_gap() / self._open_gap),
+        )
+
+    def _step(self, action: np.ndarray) -> None:
+        self._check_cancelled()
+        self.env.step(action)
+        self.env_steps += 1
+        self.frames.append(np.asarray(self.env.last_obs["main_images"]))
+
+    def _pose_action(
+        self, current: Measurement, xyz: np.ndarray, rotation: np.ndarray
+    ) -> tuple[np.ndarray, float, float]:
+        """Return one bounded servo action and the remaining pose errors."""
+        position_error = xyz - current.xyz
+        rotation_error = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
+        action = np.zeros(7)
+        control = self.env.last_obs["control_state"]
+        frame = np.asarray(control["control_to_world_rotation"], dtype=np.float64)
+        delta = np.concatenate(
+            [
+                frame.T @ _clip_norm(position_error, self._config.position_step_m),
+                frame.T @ _clip_norm(rotation_error, self._config.rotation_step_rad),
+            ]
+        )
+        low, high = np.asarray(control["output_min"]), np.asarray(control["output_max"])
+        input_low, input_high = (
+            np.asarray(control["input_min"]),
+            np.asarray(control["input_max"]),
+        )
+        if np.any(high <= low):
+            raise ValueError("native OSC controller has invalid output bounds")
+        action[:6] = (delta - (high + low) / 2) * (input_high - input_low) / (
+            high - low
+        ) + (input_high + input_low) / 2
+        if np.any(action[:6] < input_low - 1e-8) or np.any(
+            action[:6] > input_high + 1e-8
+        ):
+            raise ValueError("servo step exceeds the native controller bounds")
+        return (
+            action,
+            float(np.linalg.norm(position_error)),
+            float(np.linalg.norm(rotation_error)),
+        )
+
+    def _ended_reason(self) -> str:
+        return "terminated" if self.env.terminated else "truncated"
+
+    def _command_gripper(self, action, opening, error, within):
+        # LIBERO accepts relative gripper commands and latches the last target.
+        action[6] = 0.0 if within else float(-np.sign(error))
 
     def record_observation(
         self,

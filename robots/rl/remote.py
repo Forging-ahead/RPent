@@ -170,10 +170,9 @@ class ToolkitWorker(RpcFacade):
 
     def describe(self) -> dict:
         """Return a small identity handshake before transferring native artifacts."""
+        interface = {"coordinates": self.toolkit._primitives.coordinates.metadata()}
         if self.config["task"]["environment"] == "maniskill":
-            interface = {"tool_capabilities": self.toolkit.tool_capabilities}
-        else:
-            interface = {"coordinates": self.toolkit._primitives.coordinates.metadata()}
+            interface["tool_capabilities"] = self.toolkit.tool_capabilities
         return {
             "task": self.config["task"],
             "episode_contract_version": EPISODE_CONTRACT_VERSION,
@@ -338,6 +337,19 @@ class RemoteToolkit(Toolkit):
             self.tool_capabilities = None
             if self.environment == "maniskill":
                 self.tool_capabilities = metadata["tool_capabilities"]
+                coords = metadata.get("coordinates") or {}
+                tcp = (
+                    "native_grasp_tcp"
+                    if self.tool_capabilities["gripper"]
+                    else "native_tool_tip"
+                )
+                if (
+                    coords.get("contract_version") != "episode_coordinates_v2"
+                    or coords.get("tcp") != tcp
+                ):
+                    raise ValueError(
+                        "remote ManiSkill TCP or mounting frame differs from the planner"
+                    )
             else:
                 coordinates = metadata.get("coordinates") or {}
                 height = (

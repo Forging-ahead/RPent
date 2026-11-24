@@ -142,7 +142,11 @@ class Coordinates:
             "axes": metadata["axes"],
             "contract_version": metadata["contract_version"],
             "frame_version": self.version,
-            "orientation": "fixed-axis XYZ RPY radians; tool +x closes the jaws, +z approaches",
+            "orientation": (
+                "fixed-axis XYZ RPY radians; +z follows the pen toward its tip"
+                if self.tcp == "native_tool_tip"
+                else "fixed-axis XYZ RPY radians; tool +x closes the jaws, +z approaches"
+            ),
             "table_height_above_base_m": None
             if self.table_height_m is None
             else round(self.table_height_m, 6),

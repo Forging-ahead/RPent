@@ -2,8 +2,7 @@ Robot episodes
 ==============
 
 Run one model against LIBERO, RoboTwin, RoboCasa, RoboDojo or ManiSkill using
-the same episode loop. ManiSkill exposes each task's native controllers and
-policy observations. The model calls ``view_env`` to receive camera images.
+the same episode loop. ManiSkill uses the shared Cartesian actions and the task's own policy cameras. The model calls ``view_env`` to receive camera images.
 
 Install the simulator
 ---------------------
@@ -70,15 +69,17 @@ with per-episode completion records and resume.
 
 For ManiSkill, pass the registered Gymnasium task ID, for example
 ``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``.
-The opening observation reports the native controller inputs. Each item of
-``execute_actions`` is one numeric control vector for one environment step.
+The opening observation gives the measured TCP pose. Use ``move_to`` and
+``set_gripper`` for a grasping arm, select an arm for a two-arm task, and
+use ``move_to`` alone for a drawing tip. One goal may take multiple native
+control steps. Locomotion and independent finger control need other primitives.
 Visual tools use the named policy cameras and their available modalities.
 SAM3 is optional. An episode reports its native return and the task's success
 criterion when defined. A missing success criterion is recorded as JSON ``null``.
 
 To verify the integration for every registered task on the simulator host, run
 ``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``.
-Each case resets the task, reads its policy cameras and sends one sampled action through RPent.
+Each case resets the task, reads its policy cameras and issues a Cartesian motion through RPent. Unmapped embodiments are reported as skips.
 
 Serve training tools
 --------------------
@@ -102,8 +103,7 @@ See the `RLinf training guide <https://github.com/zhexuanxu/RLinf/blob/rpent-ppo
 Coordinates and actions
 -----------------------
 
-ManiSkill uses native controller units and reports back-projected points in
-metres in the simulator world frame. For the other backends, positions,
+Positions,
 lengths and linear velocities use centimetres at the model
 interface. Orientations use fixed-axis XYZ roll, pitch and yaw in radians.
 The frame origin is the measured arm mount, or the midpoint of the two

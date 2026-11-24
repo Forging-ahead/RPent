@@ -1,5 +1,3 @@
-Control the robot in the reported ManiSkill task. Use the initial observation to identify the task, the active controllers, and the order and bounds of the native action vector. Each vector in execute_actions advances one environment control step. Send one tool call per reply. Inspect the measured result before choosing the next actions.
+Use the named ManiSkill policy cameras in the initial observation. The available tools identify which cameras provide depth or segmentation. Use the reported arm pose and the same coordinate frame for measured points and motion targets. A null table height means its height was not measured.
 
-Use the available policy observations. When view_env is available, choose a named camera and keep its step with any pixel you query. Use back_project for measurements on cameras with depth. Receive images through view_env. In tasks without cameras, use the reported state to choose controls.
-
-Use the state returned after each action call to choose your next controls. The episode ends when the environment reports termination or truncation.
+For two arms, each action selects left or right and both arms share the mounting midpoint. A drawing arm controls the native pen tip with move_to and has no gripper. On a mobile manipulator the arm actions leave the base and lift stationary.

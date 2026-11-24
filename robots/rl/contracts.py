@@ -222,8 +222,6 @@ def validate_episode_options(environment: str, values: dict) -> dict:
 
 def argument_hint(name: str, environment: str = "libero") -> str:
     """Short actionable model feedback, independently of validator formatting."""
-    if environment == "maniskill" and name == "execute_actions":
-        return "Supply a list of native action vectors matching the reported dimensions and bounds."
     if environment == "robotwin" and name in {"move_to", "set_gripper"}:
         return "Follow the declared native action fields and orientation convention; include the selected arm where required."
     if environment == "robocasa" and name in {"move_to", "set_gripper"}:
