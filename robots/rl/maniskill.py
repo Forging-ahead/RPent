@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from robots.rl.backends import MeasuredMobileMotion
 from robots.rl.coordinates import Coordinates
 from robots.rl.geometry import world_from_depth
 from robots.rl.maniskill_arm import ManiSkillArm, UnsupportedRobotPolicy, transform
@@ -68,7 +69,7 @@ def _make_env(task_name: str, render_device: int | None, max_episode_steps: int 
         raise
 
 
-class ManiSkillPrimitives(RecordedPerception):
+class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
     """Expose native policy observations, controller actions and episode metrics."""
 
     def __init__(
@@ -119,6 +120,28 @@ class ManiSkillPrimitives(RecordedPerception):
                 }
             else:
                 self.arms = {"arm": ManiSkillArm(self, native.agent)}
+            self.mobile = not self.dual_arm and native.agent.uid == "fetch"
+            if self.mobile:
+                arm = self.arms["arm"]
+                self._lift_index = [
+                    joint.name for joint in arm.parts["body"].joints
+                ].index("torso_lift_joint")
+                self._max_episode_steps = self.env.spec.max_episode_steps
+                base = arm.parts["base"]._original_single_action_space
+                body = arm.parts["body"]._original_single_action_space
+                self._meta = {
+                    "control_freq": native.control_freq,
+                    "parts": {
+                        "base": {
+                            "actuator_min": [base.low[0], 0, base.low[1]],
+                            "actuator_max": [base.high[0], 0, base.high[1]],
+                        },
+                        "torso": {
+                            "output_min": [body.low[self._lift_index]],
+                            "output_max": [body.high[self._lift_index]],
+                        },
+                    },
+                }
             self.has_gripper = all(arm.has_gripper for arm in self.arms.values())
             table = getattr(getattr(native, "table_scene", None), "table", None)
             mesh = table.get_first_collision_mesh() if table is not None else None
@@ -181,6 +204,11 @@ class ManiSkillPrimitives(RecordedPerception):
             if not arm.has_gripper:
                 measured.pop("opening")
             states[name] = measured
+        if self.mobile:
+            arm = self.arms["arm"]
+            states["arm"]["lift_m"] = float(
+                np.asarray(arm.parts["body"].qpos)[0, self._lift_index]
+            )
         return states if self.dual_arm else states["arm"]
 
     def _refresh_coordinates(self):
@@ -211,8 +239,37 @@ class ManiSkillPrimitives(RecordedPerception):
     def set_gripper(self, *, opening, arm="arm"):
         return self.arms[arm].set_gripper(opening=opening)
 
-    def step_controllers(self) -> None:
-        self._check_cancelled()
+    def _mobility_state(self):
+        from scipy.spatial.transform import Rotation
+
+        chassis = transform(self.arms["arm"].agent.base_link.pose)
+        return (
+            chassis[:3, 3].copy(),
+            Rotation.from_matrix(chassis[:3, :3]),
+            self.coordinates.origin.copy(),
+        )
+
+    def _mobile_step(self, velocity=None, lift=0.0, *, check_cancelled=True):
+        arm = self.arms["arm"]
+        command = arm.last.copy()
+        # Fetch has a differential drive and a delta-position torso in pd_joint_pos mode.
+        base = arm.parts["base"]._original_single_action_space
+        body = arm.parts["body"]._original_single_action_space
+        twist = np.zeros(2) if velocity is None else np.asarray(velocity)[[0, 2]]
+        command[arm.slices["base"]] = (
+            2 * (twist - base.low) / (base.high - base.low) - 1
+        )
+        delta = np.zeros(body.shape)
+        delta[self._lift_index] = lift
+        command[arm.slices["body"]] = (
+            2 * (delta - body.low) / (body.high - body.low) - 1
+        )
+        arm.last = command
+        self.step_controllers(check_cancelled=check_cancelled)
+
+    def step_controllers(self, *, check_cancelled=True) -> None:
+        if check_cancelled:
+            self._check_cancelled()
         if self.ended:
             raise RuntimeError("ManiSkill episode has ended")
         # Explicit batch dimensions remain valid after an official control-mode switch.

@@ -262,3 +262,60 @@ def test_dual_arm_uses_native_labels_and_holds_idle_arm(tmp_path, monkeypatch):
         assert result.data["final_state"]["right"]["pose"]["xyz"] == [6.0, -20.0, 30.0]
     finally:
         kit.close()
+
+
+def test_fetch_uses_mobile_batch_and_validates_lateral_velocity():
+    from robots.rl.toolkit import episode_tools
+
+    caps = {
+        "rgb_cameras": [],
+        "depth_cameras": [],
+        "segment": False,
+        "dual_arm": False,
+        "gripper": True,
+        "mobile": True,
+    }
+    fetch = next(
+        t
+        for t in episode_tools(None, "maniskill", 4, capabilities=caps)
+        if t.name == "execute_actions"
+    )
+    base = {"action": "move_base", "vx": 10, "vy": 0, "yaw_rate": 0.2, "duration_s": 1}
+    fetch.validate_arguments(
+        {"actions": [base, {"action": "move_lift", "delta_cm": 2}]}
+    )
+    with pytest.raises(ValueError):
+        fetch.validate_arguments({"actions": [{**base, "vy": 10}]})
+    robocasa = next(
+        t for t in episode_tools(None, "robocasa", 4) if t.name == "execute_actions"
+    )
+    robocasa.validate_arguments({"actions": [{**base, "vy": 10}]})
+
+
+def test_fetch_controller_converts_drive_and_torso_to_native_inputs():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    def component(low, high):
+        from gymnasium.spaces import Box
+
+        return SimpleNamespace(
+            _original_single_action_space=Box(
+                np.array(low, np.float32), np.array(high, np.float32)
+            )
+        )
+
+    arm = SimpleNamespace(
+        last=np.array([0.7, 0, 0, 0, 0, 0], dtype=float),
+        slices={"base": slice(1, 3), "body": slice(3, 6)},
+        parts={
+            "base": component([-1, -3.14], [1, 3.14]),
+            "body": component([-0.1] * 3, [0.1] * 3),
+        },
+    )
+    sim = SimpleNamespace(arms={"arm": arm}, _lift_index=2, step_controllers=Mock())
+    maniskill.ManiSkillPrimitives._mobile_step(sim, np.array([0.2, 0, 0.314]), 0.025)
+    np.testing.assert_allclose(arm.last, [0.7, 0.2, 0.1, 0, 0, 0.25], atol=1e-6)
+    maniskill.ManiSkillPrimitives._mobile_step(sim, check_cancelled=False)
+    np.testing.assert_allclose(arm.last, [0.7, 0, 0, 0, 0, 0], atol=1e-6)
+    sim.step_controllers.assert_called_with(check_cancelled=False)

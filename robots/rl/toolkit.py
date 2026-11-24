@@ -85,7 +85,9 @@ def episode_tools(
         if depth:
             views.append((owner.back_project, depth))
         batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
-        if not capabilities["gripper"]:
+        if capabilities.get("mobile"):
+            batch_type = MobileBatch
+        elif not capabilities["gripper"]:
             batch_type = ToolTipBatch
     else:
         cameras = CAMERAS[environment]
@@ -101,6 +103,13 @@ def episode_tools(
         }[environment]
     batch = batch_type(toolkit).execute_actions
     schema = batch.input_schema
+    if environment == "maniskill" and capabilities.get("mobile"):
+        lateral = schema["$defs"]["BaseMove"]["properties"]["vy"]
+        lateral.update(
+            minimum=0,
+            maximum=0,
+            description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
+        )
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
         batch,
@@ -163,6 +172,7 @@ class RLToolkit(Toolkit):
                     "depth_cameras": list(native.depth_cameras),
                     "segment": bool(native.cameras) and native._sam3 is not None,
                     "dual_arm": native.dual_arm,
+                    "mobile": bool(getattr(native, "mobile", False)),
                     "gripper": native.has_gripper,
                 }
             else:
