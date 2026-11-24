@@ -41,6 +41,10 @@ def primitive_owner(environment: str):
         from robots.rl.tools import LiberoRLPrimitives
 
         return LiberoRLPrimitives
+    if environment == "maniskill":
+        from robots.rl.maniskill import ManiSkillPrimitives
+
+        return ManiSkillPrimitives
     if environment == "robodojo":
         from robots.rl.robodojo import RoboDojoPrimitives
 
@@ -66,6 +70,7 @@ def episode_tools(toolkit, environment, max_actions, perception=None):
     owner = RecordedPerception if perception is None else perception
     batch_type = {
         "libero": ActionBatch,
+        "maniskill": ActionBatch,
         "robocasa": MobileBatch,
         "robotwin": DualArmBatch,
         "robodojo": DualArmBatch,
@@ -123,20 +128,28 @@ class RLToolkit(Toolkit):
         self._primitives = primitive_owner(environment)(
             state=state, check_cancelled=self.raise_if_cancelled, **runtime_kwargs
         )
-        if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
-            self._primitives.display_size = image_size
-        self.action_error = None
-        self._task = self._primitives.env.get_task_language()
-        self._publish_step(self._primitives.record_observation())
-        self._recorded_env_steps = 0
-        self.add_tools(
-            episode_tools(
-                self,
-                environment,
-                max_actions_per_call,
-                perception=self._primitives,
+        try:
+            if (
+                environment in {"libero", "maniskill", "robocasa"}
+                and image_size != NATIVE_SIZE
+            ):
+                self._primitives.display_size = image_size
+            self.action_error = None
+            self._task = self._primitives.get_task_language()
+            self._publish_step(self._primitives.record_observation())
+            self._recorded_env_steps = 0
+            self.add_tools(
+                episode_tools(
+                    self,
+                    environment,
+                    max_actions_per_call,
+                    perception=self._primitives,
+                )
             )
-        )
+        except BaseException:
+            if environment == "maniskill":
+                self._primitives.env.close()
+            raise
 
     def frame_version(self, *, refresh: bool = False) -> int:
         """Read the measured frame under the episode's exclusive action lock."""
@@ -157,9 +170,7 @@ class RLToolkit(Toolkit):
         if self.environment != "libero":
             return {
                 **self._primitives.robot_state(),
-                "terminated": self._primitives.native_success(),
-                "truncated": self._primitives.env_steps
-                >= self._primitives._max_episode_steps,
+                **self._primitives.episode_flags(),
             }
         env = self._primitives.env
         return {
@@ -350,7 +361,11 @@ class RLToolkit(Toolkit):
 
     def close(self) -> None:
         """Save the episode video and the rollout's observation counts."""
-        super().close()
+        try:
+            super().close()
+        finally:
+            if self.environment == "maniskill":
+                self._primitives.env.close()
         self._state.save("episode.mp4", self._primitives.frames, step=None, fps=20)
         self._state.save(
             "rollout.json",

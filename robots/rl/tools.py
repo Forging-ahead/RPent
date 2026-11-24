@@ -118,6 +118,10 @@ class LiberoRLPrimitives(RecordedPerception):
         self._mask_ids = itertools.count(1)
         self._sam_calls = itertools.count(1)
 
+    def get_task_language(self) -> str:
+        """Read the initial native task instruction."""
+        return self.env.get_task_language()
+
     @property
     def ended(self) -> bool:
         return self.env.terminated or self.env.truncated
@@ -276,7 +280,6 @@ class LiberoRLPrimitives(RecordedPerception):
                 reason = "stalled"
             if reason is not None:
                 break
-            # Gripper 0 keeps the last finger command.
             self._step(action)
         return ToolResult(
             data={
@@ -300,6 +303,10 @@ class LiberoRLPrimitives(RecordedPerception):
         if self.ended:
             return ToolResult(data={"error": "episode_ended"})
         return self._drive_gripper(opening)
+
+    def _gripper_action(self, opening: float, error: float, within: bool) -> float:
+        # LIBERO holds the prior command at zero; positive commands close.
+        return 0.0 if within else float(-np.sign(error))
 
     def _drive_gripper(self, opening: float) -> ToolResult:
         """Hold the initial TCP pose while driving and measuring the fingers."""
@@ -334,8 +341,7 @@ class LiberoRLPrimitives(RecordedPerception):
                 self._site_target(hold_xyz, hold.rotation, current),
                 hold.rotation,
             )
-            # Native gripper input: -1 opens, +1 closes, 0 keeps the command.
-            action[6] = 0.0 if within else float(-np.sign(error))
+            action[6] = self._gripper_action(opening, error, within)
             self._step(action)
         return ToolResult(
             data={

@@ -12,6 +12,7 @@ from rpent.tools import Tool
 EPISODE_CONTRACT_VERSION = 3
 CAMERAS = {
     "libero": ("agentview", "wrist"),
+    "maniskill": ("agentview",),
     "robocasa": ("agentview", "agentview_right", "wrist"),
     "robotwin": ("head", "left_wrist", "right_wrist"),
     "robodojo": ("cam_head", "cam_left_wrist", "cam_right_wrist"),

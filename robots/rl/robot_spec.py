@@ -28,7 +28,11 @@ from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robots.rl.contracts import EPISODE_CONTRACT_VERSION, validate_episode_options
+from robots.rl.contracts import (
+    CAMERAS,
+    EPISODE_CONTRACT_VERSION,
+    validate_episode_options,
+)
 from robots.rl.prompt_bundle import system_prompt, user_prompt
 from rpent.dashboard.events import DashboardEventSink
 from rpent.evaluation import RunFinalizationContext, write_json_atomic
@@ -95,7 +99,7 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     parser.add_argument(
         "--simulator",
         dest="env",
-        choices=("libero", "robocasa", "robotwin", "robodojo"),
+        choices=tuple(CAMERAS),
         default="libero",
     )
     parser.add_argument("--max-actions-per-call", type=int, default=3)
@@ -214,7 +218,7 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
     if environment == "libero" and args.task is None:
         raise ValueError("--task is required")
     if environment != "libero" and not args.task_name:
-        raise ValueError("--task-name is required for RoboCasa, RoboTwin and RoboDojo")
+        raise ValueError("--task-name is required for this simulator")
     if environment != "libero" and not re.fullmatch(r"[A-Za-z0-9_]+", args.task_name):
         raise ValueError("task names must contain only letters, digits and underscores")
     cell = (
@@ -476,6 +480,20 @@ def _init_runtime(
     if unknown := selected.difference(starters):
         raise ValueError(f"unknown rl runtime components: {sorted(unknown)}")
 
+    runtime_kwargs: dict[str, Any] = {}
+    if args.env == "maniskill" and "env" in selected:
+        selected.remove("env")
+        if args.env_endpoint or args.sim_python:
+            raise ValueError(
+                "Run the ManiSkill toolkit in the ManiSkill Python environment"
+            )
+        runtime_kwargs.update(
+            task_name=args.task_name,
+            seed=args.seed,
+            render_device=args.cuda_device,
+            max_episode_steps=args.max_episode_steps,
+        )
+
     owned: dict[str, ProcessDaemon] = {}
     pending = {
         name: try_spawn_server(
@@ -484,7 +502,6 @@ def _init_runtime(
         for name, starter in starters.items()
         if name in selected
     }
-    runtime_kwargs: dict[str, Any] = {}
     for name, (daemon, rpc) in pending.items():
         runtime_kwargs.update(
             try_wait_server(
