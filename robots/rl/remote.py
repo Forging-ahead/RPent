@@ -170,6 +170,10 @@ class ToolkitWorker(RpcFacade):
 
     def describe(self) -> dict:
         """Return a small identity handshake before transferring native artifacts."""
+        if self.config["task"]["environment"] == "maniskill":
+            interface = {"tool_capabilities": self.toolkit.tool_capabilities}
+        else:
+            interface = {"coordinates": self.toolkit._primitives.coordinates.metadata()}
         return {
             "task": self.config["task"],
             "episode_contract_version": EPISODE_CONTRACT_VERSION,
@@ -177,7 +181,7 @@ class ToolkitWorker(RpcFacade):
             "episode_options": remote_options(self.config["task"]),
             "source_digest": source_digest(),
             "tools": declarations(self.toolkit),
-            "coordinates": self.toolkit._primitives.coordinates.metadata(),
+            **interface,
             "pid": os.getpid(),
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         }
@@ -192,6 +196,11 @@ class ToolkitWorker(RpcFacade):
         return {
             "solved": self.toolkit.solved(),
             "completion_result": self.toolkit.completion_result(),
+            **(
+                {"native_outcome": self.toolkit.native_outcome()}
+                if self.config["task"]["environment"] == "maniskill"
+                else {}
+            ),
             "infrastructure_error": getattr(self.toolkit, "infrastructure_error", None),
         }
 
@@ -281,6 +290,7 @@ class RemoteToolkit(Toolkit):
         self._rpc = make_rpc_client(endpoint)
         self._output = config.output_dir
         self.output_dir = Path(config.output_dir)
+        self.environment = request["task"]["environment"]
         options = remote_options(request["task"])
         configured = remote_options(
             {**request["task"], **getattr(config, "prompt_vars", {})}
@@ -297,6 +307,7 @@ class RemoteToolkit(Toolkit):
         self._solved = False
         self.infrastructure_error = None
         self._completion = None
+        self._native_outcome = {}
         self._transport_error = None
         self._heartbeat = None
         if owner_id is None:
@@ -324,27 +335,32 @@ class RemoteToolkit(Toolkit):
                 or metadata["episode_options"] != options
             ):
                 raise ValueError("remote toolkit task or budget mismatch")
-            coordinates = metadata.get("coordinates") or {}
-            height = (
-                "floor_height_above_base_m"
-                if coordinates.get("support_surface") == "floor"
-                else "table_height_above_base_m"
-            )
-            if (
-                coordinates.get("tcp")
-                not in {"grip_site", "native_grasp_tcp", "calibrated_grasp_tcp"}
-                or coordinates.get("contract_version") != "episode_coordinates_v2"
-                or coordinates.get(height) is None
-            ):
-                raise ValueError(
-                    "remote general toolkit lacks matching base, support surface and TCP calibration"
+            self.tool_capabilities = None
+            if self.environment == "maniskill":
+                self.tool_capabilities = metadata["tool_capabilities"]
+            else:
+                coordinates = metadata.get("coordinates") or {}
+                height = (
+                    "floor_height_above_base_m"
+                    if coordinates.get("support_surface") == "floor"
+                    else "table_height_above_base_m"
                 )
+                if (
+                    coordinates.get("tcp")
+                    not in {"grip_site", "native_grasp_tcp", "calibrated_grasp_tcp"}
+                    or coordinates.get("contract_version") != "episode_coordinates_v2"
+                    or coordinates.get(height) is None
+                ):
+                    raise ValueError(
+                        "remote general toolkit lacks matching base, support surface and TCP calibration"
+                    )
             from robots.rl.toolkit import episode_tools
 
             for definition in episode_tools(
                 self,
-                request["task"]["environment"],
+                self.environment,
                 self.max_actions_per_call,
+                capabilities=self.tool_capabilities,
             ):
                 self.add_tool(definition.with_handler(self._handler(definition.name)))
             if metadata["tools"] != declarations(self):
@@ -400,6 +416,8 @@ class RemoteToolkit(Toolkit):
         self._solved = payload["solved"]
         self.infrastructure_error = payload.get("infrastructure_error")
         self._completion = payload.get("completion_result")
+        if self.environment == "maniskill":
+            self._native_outcome = payload["native_outcome"]
         self.workflow_stats = payload["workflow_stats"]
         trace = self._output / "remote-transfer.jsonl"
         with trace.open("a") as file:
@@ -471,7 +489,11 @@ class RemoteToolkit(Toolkit):
         """Return the native terminal state received from the owning worker."""
         return self._completion
 
-    def solved(self) -> bool:
+    def native_outcome(self) -> dict:
+        """Return the most recent native metrics from the simulator worker."""
+        return self._native_outcome
+
+    def solved(self) -> bool | None:
         return self._solved
 
     def _renew(self) -> None:

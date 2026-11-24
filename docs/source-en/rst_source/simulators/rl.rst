@@ -1,10 +1,9 @@
 Robot episodes
 ==============
 
-Run one model against LIBERO, RoboTwin, RoboCasa or RoboDojo. All four use the
-same episode loop and the tools ``view_env``, ``segment``, ``back_project`` and
-``execute_actions``. The simulator measures state, applies actions, and reports
-task success. Only ``view_env`` sends images to the model.
+Run one model against LIBERO, RoboTwin, RoboCasa, RoboDojo or ManiSkill using
+the same episode loop. ManiSkill exposes each task's native controllers and
+policy observations. The model calls ``view_env`` to receive camera images.
 
 Install the simulator
 ---------------------
@@ -19,6 +18,7 @@ the paired RLinf simulator adapter from its checkout.
    bash tools/rl/install_simulator.sh robotwin .venv-robotwin "$RLINF_ROOT"
    bash tools/rl/install_simulator.sh robocasa .venv-robocasa "$RLINF_ROOT"
    bash tools/rl/install_simulator.sh robodojo .venv-robodojo "$RLINF_ROOT"
+   bash tools/rl/install_simulator.sh maniskill .venv-maniskill "$RLINF_ROOT"
 
 Choose the line for the environment you will run.
 
@@ -35,6 +35,8 @@ Choose the line for the environment you will run.
      - Python 3.11 and EGL. Run ``python -m robocasa.scripts.download_kitchen_assets --type all`` in its environment. See :doc:`robocasa`.
    * - RoboDojo
      - Python 3.11, Isaac Sim 5.1 and an RTX GPU. Prepare the RoboDojo assets and evaluation layouts under ``ROBODOJO_ASSETS_ROOT``. See :doc:`robodojo`.
+   * - ManiSkill
+     - Python 3.12, Linux and an NVIDIA GPU with Vulkan for rendering. If the assets are installed, set ``MS_ASSET_DIR`` to the root containing their ``data/`` directory. For a fresh installation, set that variable to a new directory and run ``python -m mani_skill.utils.download_asset all -y`` in the simulator environment. The downloader replaces existing targets when run with ``-y``.
 
 Provide an OpenAI-compatible model endpoint and a SAM3 service. Install the
 ``sam3`` extra in the Python environment that serves SAM3 and set
@@ -66,6 +68,18 @@ the images, measured states, tool results and native outcome. Use
 ``tools/rl/run_batch.py`` with a JSON list of task descriptions for collection
 with per-episode completion records and resume.
 
+For ManiSkill, pass the registered Gymnasium task ID, for example
+``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``.
+The opening observation reports the native controller inputs. Each item of
+``execute_actions`` is one numeric control vector for one environment step.
+Visual tools use the named policy cameras and their available modalities.
+SAM3 is optional. An episode reports its native return and the task's success
+criterion when defined. A missing success criterion is recorded as JSON ``null``.
+
+To verify the integration for every registered task on the simulator host, run
+``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``.
+Each case resets the task, reads its policy cameras and sends one sampled action through RPent.
+
 Serve training tools
 --------------------
 
@@ -88,7 +102,9 @@ See the `RLinf training guide <https://github.com/zhexuanxu/RLinf/blob/rpent-ppo
 Coordinates and actions
 -----------------------
 
-Positions, lengths and linear velocities use centimetres at the model
+ManiSkill uses native controller units and reports back-projected points in
+metres in the simulator world frame. For the other backends, positions,
+lengths and linear velocities use centimetres at the model
 interface. Orientations use fixed-axis XYZ roll, pitch and yaw in radians.
 The frame origin is the measured arm mount, or the midpoint of the two
 mounts. Forward, robot left and up are positive X, Y and Z. The back projection

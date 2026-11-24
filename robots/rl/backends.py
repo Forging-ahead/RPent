@@ -61,21 +61,14 @@ class ScenePrimitives(LiberoRLPrimitives):
 
     @property
     def ended(self) -> bool:
-        return any(self.episode_flags().values())
-
-    def episode_flags(self) -> dict[str, bool]:
-        """Return the terminal flags of the current observation."""
-        return {
-            "terminated": self.native_success(),
-            "truncated": self.env_steps >= self._max_episode_steps,
-        }
+        return self.native_success() or self.env_steps >= self._max_episode_steps
 
     def native_success(self) -> bool:
         """Read and latch the simulator's verdict, independently of tool status."""
         raise NotImplementedError
 
     def _ended_reason(self) -> str:
-        return "terminated" if self.episode_flags()["terminated"] else "truncated"
+        return "terminated" if self.native_success() else "truncated"
 
     def robot_state(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -84,7 +77,8 @@ class ScenePrimitives(LiberoRLPrimitives):
         state = self.robot_state()
         with self._state.record_step(
             state=state,
-            **self.episode_flags(),
+            terminated=self.native_success(),
+            truncated=self.env_steps >= self._max_episode_steps,
             command=command,
             result=result,
             elapsed_s=elapsed_s,

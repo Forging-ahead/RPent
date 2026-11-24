@@ -203,6 +203,81 @@ class ActionBatch:
         )
 
 
+class ManiSkillActionBatch:
+    """Apply model-selected actions in the native controller's action space."""
+
+    def __init__(self, toolkit):
+        self.toolkit = toolkit
+
+    @tool
+    def execute_actions(
+        self, actions: Annotated[list[list[float]], Field(min_length=1)]
+    ) -> ToolResult:
+        """Advance the environment once per action vector in order. Use the controller layout and numeric bounds in the opening observation. Execution stops at termination or truncation.
+
+        Args:
+            actions: One or more vectors in the environment's flattened action space.
+        """
+        tk = self.toolkit
+        native = tk._primitives
+        if tk.infrastructure_error is not None:
+            return ToolResult(
+                data={"error": "Previous native action failed", "executed_count": 0}
+            )
+        try:
+            for action in actions:
+                native.validate_action(action)
+        except ValueError as exc:
+            return ToolResult(data={"error": str(exc), "executed_count": 0})
+        stats = tk.workflow_stats
+        stats["batch_calls"] = stats.get("batch_calls", 0) + 1
+        results = []
+        for index, action in enumerate(actions):
+            if native.ended:
+                break
+            tk.raise_if_cancelled()
+            started = time.perf_counter()
+            try:
+                native.step_action(action)
+                feedback = {
+                    "env_steps": native.env_steps,
+                    "terminated": native.terminated,
+                    "truncated": native.truncated,
+                }
+                record = native.record_observation(
+                    command={"action": "execute_actions", "actions": [action]},
+                    result=feedback,
+                    elapsed_s=time.perf_counter() - started,
+                )
+                # Toolkit publishes the last observation when the call returns.
+                if index + 1 < len(actions) and not native.ended:
+                    tk._publish_step(record)
+            except ToolCancelled:
+                raise
+            except Exception as exc:
+                # A simulator or recorder failure after dispatch must not be retried.
+                tk.action_error = {"action": "execute_actions", "message": str(exc)}
+                tk.state.save("infrastructure_error.json", tk.action_error, step=None)
+                return ToolResult(
+                    data={
+                        "error": f"Native action or observation capture failed: {exc}",
+                        "executed_count": len(results),
+                        "state_stale": True,
+                    }
+                )
+            stats["atomic_actions"] = stats.get("atomic_actions", 0) + 1
+            results.append({"step": record.step_idx, **feedback})
+        return ToolResult(
+            data={
+                "executed_count": len(results),
+                "results": results,
+                "state": native.robot_state(),
+                "terminated": native.terminated,
+                "truncated": native.truncated,
+            }
+        )
+
+
 class DualArmBatch(ActionBatch):
     @tool
     def execute_actions(

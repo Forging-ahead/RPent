@@ -197,6 +197,38 @@ def test_native_task_failure_is_valid_but_success_must_match_environment(tmp_pat
         audit_episode(tmp_path)
 
 
+def test_audit_maniskill_accepts_task_without_success_and_checks_recorded_return(
+    tmp_path,
+):
+    from rpent.evaluation.trajectory import audit_episode
+
+    _episode_fixture(tmp_path)
+    native = {
+        "success": None,
+        "fail": True,
+        "terminated": True,
+        "truncated": False,
+        "episode_return": 1.25,
+    }
+    result_path = tmp_path / "result.json"
+    result = {
+        **json.loads(result_path.read_text()),
+        "task": {"environment": "maniskill", "task_name": "Example-v1"},
+        **native,
+    }
+    result_path.write_text(json.dumps(result))
+    (tmp_path / "states.json").write_text(
+        json.dumps(
+            {"steps": [{"terminated": True, "truncated": False, "extras": native}]}
+        )
+    )
+    verified, _ = audit_episode(tmp_path)
+    assert verified["success"] is None and verified["fail"] is True
+    result_path.write_text(json.dumps({**result, "episode_return": 0.0}))
+    with pytest.raises(ValueError, match="native episode_return mismatch"):
+        audit_episode(tmp_path)
+
+
 def test_wire_native_output_mismatch_cannot_enter_sft(tmp_path):
     from rpent.evaluation.trajectory import audit_episode
 

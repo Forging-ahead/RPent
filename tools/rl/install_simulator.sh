@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# != 3 ]]; then
-  echo 'Usage: install_simulator.sh {libero|robotwin|robocasa|robodojo} VENV RLINF_ROOT' >&2
+  echo 'Usage: install_simulator.sh {libero|robotwin|robocasa|robodojo|maniskill} VENV RLINF_ROOT' >&2
   exit 2
 fi
 
@@ -15,6 +15,10 @@ case "$simulator" in
   libero)
     python_version=3.12
     profile=libero-rl.txt
+    ;;
+  maniskill)
+    python_version=3.12
+    profile=rl-maniskill.txt
     ;;
   robotwin|robocasa|robodojo)
     python_version=3.11

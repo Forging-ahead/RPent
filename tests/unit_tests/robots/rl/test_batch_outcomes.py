@@ -101,6 +101,57 @@ def test_simulator_startup_timeout_is_infrastructure_failure(tmp_path):
     assert batch.terminal_failure(tmp_path, deadline=True, job={"seed": 1}) is None
 
 
+def test_maniskill_job_keeps_native_env_id(tmp_path):
+    jobs = tmp_path / "jobs.json"
+    job = {"environment": "maniskill", "task_name": "MS-AntWalk-v1", "seed": 0}
+    jobs.write_text(json.dumps([job]))
+    [parsed] = batch.read_jobs(jobs, None)
+    assert batch.job_arguments(parsed) == [
+        "--simulator",
+        "maniskill",
+        "--seed",
+        "0",
+        "--task-name",
+        "MS-AntWalk-v1",
+    ]
+    jobs.write_text(json.dumps([{**job, "task_name": "../MS-AntWalk-v1"}]))
+    with pytest.raises(ValueError, match="invalid task"):
+        batch.read_jobs(jobs, None)
+
+
+def test_maniskill_native_failure_without_success_is_retained(tmp_path):
+    task = {"environment": "maniskill", "task_name": "UnitreeG1Stand-v1", "seed": 0}
+    metrics = {
+        "terminated": True,
+        "truncated": False,
+        "success": None,
+        "fail": True,
+        "episode_return": 0.75,
+    }
+    record = {"terminated": True, "truncated": False, "extras": metrics}
+    (tmp_path / "states.json").write_text(json.dumps({"steps": [record]}))
+    (tmp_path / "transcript_api.json").write_text(json.dumps({"error": None}))
+    result = {"task": task, "stats": {"turns_used": 1}, "max_turns": 8, **metrics}
+    (tmp_path / "result.json").write_text(json.dumps(result))
+    outcome = batch.completed_without_training_trace(tmp_path, "trace unavailable")
+    assert outcome["termination_reason"] == "environment_failure"
+    assert outcome["success"] is None and outcome["episode_return"] == 0.75
+    assert batch._success_counts([outcome, {"success": True}, {"success": False}]) == {
+        "successes": 1,
+        "episodes_with_success_metric": 2,
+    }
+    (tmp_path / "result.json").write_text(json.dumps({**result, "success": True}))
+    assert batch.completed_without_training_trace(tmp_path, "invalid") is None
+    # A killed worker may have durable states and model turns but no final result.
+    (tmp_path / "result.json").unlink()
+    native = tmp_path / "api_trace/native"
+    native.mkdir(parents=True)
+    (native / "000001.json").write_text("{}")
+    outcome = batch.terminal_failure(tmp_path, deadline=True, job=task)
+    assert outcome["success"] is None and outcome["fail"] is True
+    assert outcome["episode_return"] == 0.75
+
+
 def test_resume_rejects_a_modified_evaluation(tmp_path):
     attempt = tmp_path / "attempt-001"
     attempt.mkdir()

@@ -35,12 +35,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from robots.rl.contracts import (
-    CAMERAS,
     EPISODE_CONTRACT_VERSION,
+    SUPPORTED_ENVIRONMENTS,
+    valid_task_identifier,
     validate_episode_options,
 )
 from rpent.evaluation import write_json_atomic as atomic
-from rpent.evaluation.trajectory import audit_episode
+from rpent.evaluation.trajectory import audit_episode, verify_native_outcome
 from rpent.planner.admission import recorded_queue_seconds
 from rpent.utils.daemon import process_start_ticks, stop_owned_process_group
 
@@ -193,17 +194,12 @@ def read_jobs(path: Path, seeds: list[int] | None) -> list[dict]:
     normalized = []
     for original in jobs:
         row = {"environment": "libero", **original}
-        if row["environment"] not in CAMERAS:
+        if row["environment"] not in SUPPORTED_ENVIRONMENTS:
             raise ValueError(f"Unsupported simulator: {row['environment']}")
-        identifiers = (
-            [row.get("suite")]
-            if row["environment"] == "libero"
-            else [row.get("task_name")]
+        identifier = (
+            row.get("suite") if row["environment"] == "libero" else row.get("task_name")
         )
-        if any(
-            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name)
-            for name in identifiers
-        ):
+        if not valid_task_identifier(row["environment"], identifier):
             raise ValueError(f"invalid task identifier: {row}")
         if row["environment"] == "libero" and (
             not isinstance(row.get("task"), int) or row["task"] < 0
@@ -265,6 +261,41 @@ def seed_values(value: str) -> list[int]:
     return list(dict.fromkeys(result))
 
 
+def _recorded_outcome(result: dict) -> dict:
+    """Keep ManiSkill's independent verdicts and cumulative native reward."""
+    fields = ("success",)
+    if (
+        result.get("task", {}).get("environment") == "maniskill"
+        and "episode_return" in result
+    ):
+        fields = ("success", "fail", "terminated", "truncated", "episode_return")
+    return {key: result[key] for key in fields}
+
+
+def _last_outcome(result: dict, states: list[dict], job: dict | None = None) -> dict:
+    """Recover an interrupted episode from its last durable observation."""
+    task = result.get("task") or job or {}
+    if not result:
+        snapshot = states[-1].get("extras", {})
+        if task.get("environment") == "maniskill" and "episode_return" in snapshot:
+            result = snapshot
+        else:
+            result = {"success": bool(states[-1]["terminated"])}
+    result = {**result, "task": task}
+    verify_native_outcome(result, states)
+    return _recorded_outcome(result)
+
+
+def _success_counts(outcomes: list[dict]) -> dict:
+    """Give the number of successes and the number with a defined verdict."""
+    return {
+        "successes": sum(row["success"] is True for row in outcomes),
+        "episodes_with_success_metric": sum(
+            row["success"] is not None for row in outcomes
+        ),
+    }
+
+
 def completed(output: Path) -> dict | None:
     """Return an audited sealed attempt, ignoring partial or damaged attempts."""
     for path in sorted(output.glob("attempt-*/COMPLETED.json")):
@@ -272,7 +303,7 @@ def completed(output: Path) -> dict | None:
             result, _ = audit_episode(path.parent, verify_assets=True)
             return {
                 "directory": str(path.parent.resolve()),
-                "success": result["success"],
+                **_recorded_outcome(result),
                 "task": result["task"],
                 "stats": result["stats"],
             }
@@ -325,13 +356,10 @@ def terminal_failure(
         ):
             # A stuck simulator startup is infrastructure failure, not model budget exhaustion.
             return None
-        success = bool(states and states[-1]["terminated"])
-        if result and bool(result.get("success")) != success:
-            return None
         return {
             "directory": str(attempt.resolve()),
             "task": result.get("task", job),
-            "success": success,
+            **_last_outcome(result, states, job),
             "stats": result.get("stats", {}),
             "training_usable": False,
             "termination_reason": kind,
@@ -374,19 +402,25 @@ def completed_without_training_trace(attempt: Path, audit_error: str) -> dict | 
             or transcript.get("error")
             or not states
             or not result["stats"]["turns_used"]
-            or bool(result["success"]) != bool(states[-1]["terminated"])
         ):
             return None
-        reason = "success" if result["success"] else "planner_completed"
-        if not result["success"]:
-            if states[-1].get("truncated"):
-                reason = "environment_step_limit"
-            elif result["stats"]["turns_used"] >= result["max_turns"]:
-                reason = "request_limit"
+        metrics = _last_outcome(result, states)
+        if metrics["success"]:
+            reason = "success"
+        elif metrics.get("terminated"):
+            reason = (
+                "environment_failure" if metrics["fail"] else "environment_terminated"
+            )
+        elif states[-1].get("truncated"):
+            reason = "environment_step_limit"
+        elif result["stats"]["turns_used"] >= result["max_turns"]:
+            reason = "request_limit"
+        else:
+            reason = "planner_completed"
         return {
             "directory": str(attempt.resolve()),
             "task": result["task"],
-            "success": bool(result["success"]),
+            **metrics,
             "stats": result["stats"],
             "training_usable": False,
             "termination_reason": reason,
@@ -799,7 +833,8 @@ def collect(args: argparse.Namespace, batch: Path) -> None:
                 "env_steps", 0
             ):
                 moved += 1
-        native_successes = sum(row["success"] for row in pilot_rows)
+        pilot_counts = _success_counts(pilot_rows)
+        native_successes = pilot_counts["successes"]
         if not moved:
             pause_reason = "pilot_no_measured_motion"
         elif (
@@ -815,6 +850,9 @@ def collect(args: argparse.Namespace, batch: Path) -> None:
                 "infrastructure_errors": len(pilot) - len(pilot_rows),
                 "episodes_with_motion": moved,
                 "native_successes": native_successes,
+                "episodes_with_success_metric": pilot_counts[
+                    "episodes_with_success_metric"
+                ],
                 "passed": pause_reason is None,
                 "pause_reason": pause_reason,
             },
@@ -832,7 +870,7 @@ def collect(args: argparse.Namespace, batch: Path) -> None:
             "valid": len(records),
             "evaluated": len(outcomes),
             "infrastructure_errors": len(exhausted),
-            "successes": sum(x["success"] for x in outcomes),
+            **_success_counts(outcomes),
             "elapsed_seconds": time.time() - started,
             "started_at": started,
             "finished_at": time.time(),
@@ -855,12 +893,6 @@ def summary(args: argparse.Namespace) -> None:
         if output.is_dir()
         if (row := completed(output)) is not None
     ]
-    report = {
-        "valid": len(rows),
-        "evaluated": len(rows),
-        "successes": sum(x["success"] for x in rows),
-        "episodes": rows,
-    }
     quarantined = [
         row
         for output in sorted(batch.iterdir())
@@ -868,9 +900,13 @@ def summary(args: argparse.Namespace) -> None:
         if completed(output) is None
         if (row := evaluated(output)) is not None
     ]
-    report["evaluated"] += len(quarantined)
-    report["successes"] += sum(row["success"] for row in quarantined)
-    report["excluded_from_training"] = quarantined
+    report = {
+        "valid": len(rows),
+        "evaluated": len(rows) + len(quarantined),
+        **_success_counts(rows + quarantined),
+        "episodes": rows,
+        "excluded_from_training": quarantined,
+    }
     print(json.dumps(report, indent=2))
 
 

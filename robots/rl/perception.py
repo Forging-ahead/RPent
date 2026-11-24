@@ -210,9 +210,6 @@ class RecordedPerception:
             if not _inside(point, displayed):
                 return _error("point outside the image", **metadata)
             point = map_pixel(point, displayed, native_shape)
-        world = self._depth_aligned(
-            self._state.load(f"{camera}_world.npz", step=index), native_shape
-        )
         if f"{camera}_raw.png" in self._state.get(index).artifacts:
             rgb = self._state.load_bytes(f"{camera}_raw.png", step=index)
         try:
@@ -264,12 +261,22 @@ class RecordedPerception:
         data["box"] = (
             None if native_box is None else map_box(native_box, native_shape, displayed)
         )
-        points, center = self._surface_sample(world[mask])
-        surface = geometry.surface_geometry(points, center=center)
+        surface = None
+        has_depth = camera in getattr(self, "depth_cameras", self.cameras)
+        if has_depth:
+            world = self._depth_aligned(
+                self._state.load(f"{camera}_world.npz", step=index), native_shape
+            )
+            points, center = self._surface_sample(world[mask])
+            surface = geometry.surface_geometry(points, center=center)
         if surface is None:
             data.update(
                 dict.fromkeys(("world_xyz", "top_z_m", "size_xyz_m", "axis_yaw")),
-                geometry_unavailable="insufficient depth points",
+                geometry_unavailable=(
+                    "insufficient depth points"
+                    if has_depth
+                    else "camera has no calibrated depth"
+                ),
             )
         else:
             data.update(surface)
@@ -309,6 +316,11 @@ class RecordedPerception:
             step, camera, mask = self._masks[mask_id]
         elif step is None:
             return _error("pixel and box require step")
+        depth_cameras = getattr(self, "depth_cameras", self.cameras)
+        if camera is None and depth_cameras:
+            camera = depth_cameras[0]
+        if camera not in depth_cameras:
+            return _error(f"available cameras with calibrated depth: {depth_cameras}")
         try:
             step, camera, _, native_shape, displayed, metadata = self._query_view(
                 camera, step

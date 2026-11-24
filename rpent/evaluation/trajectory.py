@@ -145,6 +145,26 @@ def complete_turns(episode: Path) -> list[tuple[Path, dict[str, Any], dict[str, 
     return [turns[k] for k in sorted(turns)]
 
 
+def verify_native_outcome(result: dict[str, Any], states: list[dict[str, Any]]) -> None:
+    """Check the episode verdict against independently recorded simulator state."""
+    last = states[-1] if states else {}
+    extras = last.get("extras", {})
+    task = result.get("task") or {}
+    if task.get("environment") == "maniskill" and (
+        task.get("task_name") != "pick_cube"
+        or "episode_return" in extras
+        or "episode_return" in result
+    ):
+        for key in ("success", "fail", "episode_return", "terminated", "truncated"):
+            if key not in result or key not in extras or result[key] != extras[key]:
+                raise ValueError(f"result/native {key} mismatch")
+        for key in ("terminated", "truncated"):
+            if result[key] is not last.get(key):
+                raise ValueError(f"result/native {key} mismatch")
+    elif bool(result["success"]) != bool(last.get("terminated")):
+        raise ValueError("result/native success mismatch")
+
+
 def audit_episode(
     episode: Path, *, verify_assets: bool = False
 ) -> tuple[dict[str, Any], list[tuple[Path, dict[str, Any], dict[str, Any]]]]:
@@ -155,9 +175,7 @@ def audit_episode(
     json.loads((episode / "rollout.json").read_text())
     if result.get("agent_error") or transcript.get("error"):
         raise ValueError(result.get("agent_error") or transcript["error"])
-    native_success = bool(states and states[-1]["terminated"])
-    if bool(result["success"]) != native_success:
-        raise ValueError(f"result/native success mismatch: {episode}")
+    verify_native_outcome(result, states)
     turns = complete_turns(episode)
     if not turns or len(turns) != result["stats"]["turns_used"]:
         raise ValueError(

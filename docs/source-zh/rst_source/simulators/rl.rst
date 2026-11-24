@@ -1,7 +1,7 @@
 机器人 Episode
 ==============
 
-用同一套 episode 在 LIBERO、RoboTwin、RoboCasa 或 RoboDojo 中运行模型。模型可调用 ``view_env``、``segment``、``back_project`` 和 ``execute_actions``。仿真器测量状态、执行动作并判定任务成功。只有 ``view_env`` 向模型返回图像。
+用同一套 episode 在 LIBERO、RoboTwin、RoboCasa、RoboDojo 和 ManiSkill 中运行模型。ManiSkill 使用各任务的原生控制器和策略观测。模型通过 ``execute_actions`` 执行动作，通过 ``view_env`` 获取策略相机图像。
 
 安装仿真环境
 ------------
@@ -14,6 +14,7 @@
    bash tools/rl/install_simulator.sh robotwin .venv-robotwin "$RLINF_ROOT"
    bash tools/rl/install_simulator.sh robocasa .venv-robocasa "$RLINF_ROOT"
    bash tools/rl/install_simulator.sh robodojo .venv-robodojo "$RLINF_ROOT"
+   bash tools/rl/install_simulator.sh maniskill .venv-maniskill "$RLINF_ROOT"
 
 .. list-table::
    :header-rows: 1
@@ -28,6 +29,8 @@
      - Python 3.11 和 EGL。在环境中运行 ``python -m robocasa.scripts.download_kitchen_assets --type all``。见 :doc:`robocasa`。
    * - RoboDojo
      - Python 3.11、Isaac Sim 5.1 和 RTX GPU。将 RoboDojo 资产和评测布局放在 ``ROBODOJO_ASSETS_ROOT``。见 :doc:`robodojo`。
+   * - ManiSkill
+     - Python 3.12、Linux 和支持 Vulkan 渲染的 NVIDIA GPU。已有资产时，将 ``MS_ASSET_DIR`` 指向含有 ``data/`` 的资产根目录。首次安装时，将该变量设为新目录，在仿真环境中执行 ``python -m mani_skill.utils.download_asset all -y``。对已有资产执行 ``-y`` 会替换对应文件。
 
 准备兼容 OpenAI API 的模型服务和 SAM3 服务。在负责 SAM3 的 Python 环境中安装 ``sam3`` extra，把 ``SAM3_CHECKPOINT_PATH`` 设为本机权重文件。用分配给 SAM3 的 GPU 启动服务。
 
@@ -52,6 +55,15 @@
 
 RoboTwin、RoboCasa 和 RoboDojo 使用 ``--simulator`` 和 ``--task-name``。RoboDojo 可用 ``--layout`` 指定评测布局。输出目录保存图像、实测状态、工具回执和原生终局。批量采集用 ``tools/rl/run_batch.py`` 读取 JSON 任务清单，逐条封存并支持续跑。
 
+ManiSkill 直接接受注册的 Gymnasium 任务 ID。例如，运行双臂任务可用
+``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``。
+初始观测给出控制器的输入格式。``execute_actions`` 的每一项是推进一个环境步所需的数值向量。
+视觉工具使用任务实际提供的策略相机和观测字段，SAM3 为可选服务。轨迹保存原生累计回报，
+有成功判据时记录其值，缺少判据时保存为 JSON ``null``。
+
+在仿真服务器运行 ``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``
+可逐个验收所有注册任务。每项测试会重置环境、读取可用的策略相机，并通过 RPent 执行一个从动作空间采样的动作。
+
 提供训练工具服务
 ----------------
 
@@ -68,6 +80,6 @@ RoboTwin、RoboCasa 和 RoboDojo 使用 ``--simulator`` 和 ``--task-name``。Ro
 坐标与动作
 ----------
 
-模型接口用厘米表示位置、长度和线速度。姿态为固定轴 XYZ 的 roll、pitch、yaw，单位为弧度。单臂取实测安装座为原点，双臂取两个安装座的中点。X 向前，Y 向机器人左侧，Z 向上。感知工具在该坐标系内回报可见表面的几何，原始深度和仿真点云仍用米。
+ManiSkill 动作采用任务控制器的原生单位，反投影结果是仿真世界系中的坐标，单位为米。其他后端的模型接口用厘米表示位置、长度和线速度。姿态为固定轴 XYZ 的 roll、pitch、yaw，单位为弧度。单臂取实测安装座为原点，双臂取两个安装座的中点。X 向前，Y 向机器人左侧，Z 向上。感知工具在该坐标系内回报可见表面的几何，原始深度和仿真点云仍用米。
 
 每批最多三个顺序动作，每项控制一个部件。RoboCasa 的手臂目标相对于该项开始时实测的坐标系，包括前一项刚移动底盘或升降的情况。观察和感知回执记录拍摄及结果所用的坐标版本，动作输入只写目标。

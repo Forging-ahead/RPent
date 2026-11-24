@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from datetime import datetime
@@ -29,8 +28,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robots.rl.contracts import (
-    CAMERAS,
     EPISODE_CONTRACT_VERSION,
+    SUPPORTED_ENVIRONMENTS,
+    valid_task_identifier,
     validate_episode_options,
 )
 from robots.rl.prompt_bundle import system_prompt, user_prompt
@@ -99,7 +99,7 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     parser.add_argument(
         "--simulator",
         dest="env",
-        choices=tuple(CAMERAS),
+        choices=SUPPORTED_ENVIRONMENTS,
         default="libero",
     )
     parser.add_argument("--max-actions-per-call", type=int, default=3)
@@ -120,10 +120,10 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         type=int,
         choices=(1024, 512, 256),
         default=1024,
-        help="VLM image width/height; native RGB-D and SAM3 remain 1024.",
+        help="VLM image width/height. Native captures keep their sensor resolution.",
     )
     parser.add_argument(
-        "--task-name", help="RoboCasa, RoboTwin or RoboDojo task identifier."
+        "--task-name", help="Native task identifier, e.g. PickCube-v1 for ManiSkill."
     )
     parser.add_argument(
         "--layout",
@@ -178,7 +178,7 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     parser.add_argument(
         "--sam3-endpoint",
         default=None,
-        help="[protocol://]host:port of an existing SAM3 server; spawned when unset.",
+        help="SAM3 server endpoint. Omit to disable segmentation for ManiSkill or to start a local server for other simulators.",
     )
     parser.add_argument(
         "--cuda-device",
@@ -218,9 +218,11 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
     if environment == "libero" and args.task is None:
         raise ValueError("--task is required")
     if environment != "libero" and not args.task_name:
-        raise ValueError("--task-name is required for this simulator")
-    if environment != "libero" and not re.fullmatch(r"[A-Za-z0-9_]+", args.task_name):
-        raise ValueError("task names must contain only letters, digits and underscores")
+        raise ValueError(f"--task-name is required for {environment}")
+    if environment != "libero" and not valid_task_identifier(
+        environment, args.task_name
+    ):
+        raise ValueError(f"invalid {environment} task identifier: {args.task_name!r}")
     cell = (
         f"{args.suite}_t{args.task}"
         if environment == "libero"
@@ -467,6 +469,31 @@ def _init_runtime(
         }
     from rpent.robots.components.sam3_client import Sam3Client
 
+    if getattr(args, "env", None) == "maniskill":
+        if args.env_endpoint:
+            raise ValueError(
+                "Use --remote-toolkit-endpoint for a remote ManiSkill environment"
+            )
+        if (
+            args.sim_python
+            and Path(args.sim_python).resolve() != Path(sys.executable).resolve()
+        ):
+            raise ValueError(
+                "Run RPent with the ManiSkill interpreter or use --remote-toolkit-endpoint"
+            )
+        client = None
+        if args.sam3_endpoint and (components is None or "sam3" in components):
+            client = Sam3Client(
+                make_rpc_client(args.sam3_endpoint), timeout_s=args.sam3_timeout_s
+            )
+        return [], {
+            "task_name": args.task_name,
+            "seed": args.seed,
+            "render_device": args.cuda_device,
+            "max_episode_steps": args.max_episode_steps,
+            "sam3_client": client,
+        }
+
     starters = {"env": _start_env, "sam3": _start_sam3}
     connectors = {
         "env": partial(_connect_env, args),
@@ -480,20 +507,6 @@ def _init_runtime(
     if unknown := selected.difference(starters):
         raise ValueError(f"unknown rl runtime components: {sorted(unknown)}")
 
-    runtime_kwargs: dict[str, Any] = {}
-    if args.env == "maniskill" and "env" in selected:
-        selected.remove("env")
-        if args.env_endpoint or args.sim_python:
-            raise ValueError(
-                "Run the ManiSkill toolkit in the ManiSkill Python environment"
-            )
-        runtime_kwargs.update(
-            task_name=args.task_name,
-            seed=args.seed,
-            render_device=args.cuda_device,
-            max_episode_steps=args.max_episode_steps,
-        )
-
     owned: dict[str, ProcessDaemon] = {}
     pending = {
         name: try_spawn_server(
@@ -502,6 +515,7 @@ def _init_runtime(
         for name, starter in starters.items()
         if name in selected
     }
+    runtime_kwargs: dict[str, Any] = {}
     for name, (daemon, rpc) in pending.items():
         runtime_kwargs.update(
             try_wait_server(

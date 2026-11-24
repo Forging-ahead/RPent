@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import replace
 
@@ -12,11 +13,23 @@ from rpent.tools import Tool
 EPISODE_CONTRACT_VERSION = 3
 CAMERAS = {
     "libero": ("agentview", "wrist"),
-    "maniskill": ("agentview",),
     "robocasa": ("agentview", "agentview_right", "wrist"),
     "robotwin": ("head", "left_wrist", "right_wrist"),
     "robodojo": ("cam_head", "cam_left_wrist", "cam_right_wrist"),
 }
+SUPPORTED_ENVIRONMENTS = (*CAMERAS, "maniskill")
+
+
+def valid_task_identifier(environment: str, name: object) -> bool:
+    """Check task identifier syntax before using it in paths or RPC requests."""
+    if not isinstance(name, str):
+        return False
+    if environment == "maniskill":
+        return (
+            name == "pick_cube"
+            or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*-v[0-9]+", name) is not None
+        )
+    return re.fullmatch(r"[A-Za-z0-9_]+", name) is not None
 
 
 def _present(name, kind):
@@ -187,7 +200,7 @@ def validate_episode_options(environment: str, values: dict) -> dict:
     """Resolve episode controls and validate them before starting a simulator."""
     from robots.rl.images import IMAGE_SIZES
 
-    if environment not in CAMERAS:
+    if environment not in SUPPORTED_ENVIRONMENTS:
         raise ValueError(f"Unsupported simulator {environment!r}")
     options = {
         name: values.get(name, default) for name, default in EPISODE_OPTIONS.items()
@@ -197,7 +210,7 @@ def validate_episode_options(environment: str, values: dict) -> dict:
             raise ValueError(f"Invalid episode option {name}")
     size = options["image_size"]
     if size not in IMAGE_SIZES or (
-        size != 1024 and environment not in {"libero", "robocasa"}
+        size != 1024 and environment not in {"libero", "robocasa", "maniskill"}
     ):
         raise ValueError(f"Unsupported image size {size} for {environment}")
     if not 1 <= options["max_actions_per_call"] <= 3:
@@ -209,6 +222,8 @@ def validate_episode_options(environment: str, values: dict) -> dict:
 
 def argument_hint(name: str, environment: str = "libero") -> str:
     """Short actionable model feedback, independently of validator formatting."""
+    if environment == "maniskill" and name == "execute_actions":
+        return "Supply a list of native action vectors matching the reported dimensions and bounds."
     if environment == "robotwin" and name in {"move_to", "set_gripper"}:
         return "Follow the declared native action fields and orientation convention; include the selected arm where required."
     if environment == "robocasa" and name in {"move_to", "set_gripper"}:
@@ -227,7 +242,6 @@ def argument_hint(name: str, environment: str = "libero") -> str:
 
 def coordinate_definition(declaration):
     """Describe the robot mounting frame in tool declarations."""
-    import re
     from dataclasses import replace
 
     def convert(value):

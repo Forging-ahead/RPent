@@ -212,12 +212,16 @@ async def solve(
 
 def episode_outcome(result: PlannerResult, toolkit: Toolkit, max_turns: int) -> dict:
     """Describe a finished episode; success always comes from the environment."""
-    success = bool(toolkit.solved())
+    native = {}
+    if getattr(toolkit, "environment", None) == "maniskill":
+        native = toolkit.native_outcome()
+    success = native["success"] if native else bool(toolkit.solved())
     execution_error = getattr(toolkit, "infrastructure_error", None)
     if execution_error is not None:
         return {
+            **native,
             "success": success,
-            "truncated": False,
+            "truncated": native.get("truncated", False),
             "terminal": False,
             "termination_reason": "infrastructure_error",
             "error_kind": "tool_transport",
@@ -238,18 +242,27 @@ def episode_outcome(result: PlannerResult, toolkit: Toolkit, max_turns: int) -> 
                     )
     if service_errors:
         return {
+            **native,
             "success": success,
-            "truncated": False,
+            "truncated": native.get("truncated", False),
             "terminal": False,
             "termination_reason": "infrastructure_error",
             "error_kind": "tool_transport",
             "error": "SAM3 service failure; retain this attempt and retry the episode at most once.",
             "service_errors": service_errors,
         }
-    truncated = toolkit.state.latest_record().truncated
+    truncated = (
+        native["truncated"] if native else toolkit.state.latest_record().truncated
+    )
     terminal_error = result.error_kind in _TERMINAL_ERRORS
     if success:
         reason = "success"
+    elif native.get("terminated"):
+        reason = (
+            "environment_failure" if native.get("fail") else "environment_terminated"
+        )
+    elif native and truncated:
+        reason = "environment_step_limit"
     elif result.error:
         reason = result.error_kind if terminal_error else "error"
     elif result.stats["turns_used"] >= max_turns:
@@ -259,9 +272,16 @@ def episode_outcome(result: PlannerResult, toolkit: Toolkit, max_turns: int) -> 
     else:
         reason = "planner_completed"
     return {
+        **native,
         "success": success,
         "truncated": truncated,
-        "terminal": success or truncated or not result.error or terminal_error,
+        "terminal": bool(
+            success
+            or native.get("terminated")
+            or truncated
+            or not result.error
+            or terminal_error
+        ),
         "termination_reason": reason,
         "error": result.error,
         "error_kind": result.error_kind,

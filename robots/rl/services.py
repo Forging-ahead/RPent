@@ -34,14 +34,14 @@ logger = get_logger("rl_services")
 def main() -> None:
     """Start local services with the caller's interpreter and clean them up together."""
     parser = argparse.ArgumentParser(description=__doc__)
-    from robots.rl.contracts import CAMERAS
+    from robots.rl.contracts import SUPPORTED_ENVIRONMENTS
 
-    parser.add_argument("--simulator", choices=tuple(CAMERAS), default="libero")
+    parser.add_argument("--simulator", choices=SUPPORTED_ENVIRONMENTS, default="libero")
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--envs-per-gpu", type=int, default=3)
     parser.add_argument("--max-initializing-per-gpu", type=int, default=2)
     parser.add_argument("--sam3-per-gpu", type=int, default=1)
-    parser.add_argument("--sam3-checkpoint", type=Path, required=True)
+    parser.add_argument("--sam3-checkpoint", type=Path, help="Optional for ManiSkill.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sam-port", type=int, default=28424)
     parser.add_argument("--backend-port", type=int, default=28490)
@@ -61,7 +61,9 @@ def main() -> None:
         parser.error(
             "GPUs must be unique nonnegative indices; per-GPU counts must be positive"
         )
-    if not args.sam3_checkpoint.is_file():
+    if args.sam3_checkpoint is None and args.simulator != "maniskill":
+        parser.error("--sam3-checkpoint is required for this simulator")
+    if args.sam3_checkpoint is not None and not args.sam3_checkpoint.is_file():
         parser.error(f"SAM3 checkpoint not found: {args.sam3_checkpoint}")
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
@@ -88,6 +90,7 @@ def main() -> None:
             daemons.append(daemon)
             return daemon
 
+        sam_replicas = args.sam3_per_gpu if args.sam3_checkpoint else 0
         sam_workers = [
             start(
                 f"sam3-gpu{gpu}-{replica}",
@@ -103,24 +106,26 @@ def main() -> None:
                 {"SAM3_CHECKPOINT_PATH": str(args.sam3_checkpoint.resolve())},
             )
             for gpu in gpus
-            for replica in range(args.sam3_per_gpu)
+            for replica in range(sam_replicas)
         ]
         endpoints = [wait_for_endpoint(worker, timeout_s=600) for worker in sam_workers]
-        pool = start(
-            "sam3-pool",
-            "rpent.robots.components.sam3_pool",
-            [
-                "--backends",
-                *endpoints,
-                "--port",
-                str(args.sam_port),
-                "--timeout-s",
-                "600",
-                "--metrics",
-                str(args.output_dir / "sam3-pool.jsonl"),
-            ],
-        )
-        pool_endpoint = wait_for_endpoint(pool)
+        pool_endpoint = None
+        if endpoints:
+            pool = start(
+                "sam3-pool",
+                "rpent.robots.components.sam3_pool",
+                [
+                    "--backends",
+                    *endpoints,
+                    "--port",
+                    str(args.sam_port),
+                    "--timeout-s",
+                    "600",
+                    "--metrics",
+                    str(args.output_dir / "sam3-pool.jsonl"),
+                ],
+            )
+            pool_endpoint = wait_for_endpoint(pool)
         backend = start(
             "backend",
             "robots.rl.remote_manager",
@@ -133,8 +138,7 @@ def main() -> None:
                 ",".join(f"{gpu}:{args.envs_per_gpu}" for gpu in gpus),
                 "--max-initializing-per-gpu",
                 str(args.max_initializing_per_gpu),
-                "--sam3-endpoint",
-                pool_endpoint,
+                *(["--sam3-endpoint", pool_endpoint] if pool_endpoint else []),
                 "--port",
                 str(args.backend_port),
             ],
@@ -147,7 +151,7 @@ def main() -> None:
             "gpus": gpus,
             "envs_per_gpu": args.envs_per_gpu,
             "max_initializing_per_gpu": args.max_initializing_per_gpu,
-            "sam3_per_gpu": args.sam3_per_gpu,
+            "sam3_per_gpu": sam_replicas,
             "sam3_workers": endpoints,
             "sam3_endpoint": pool_endpoint,
             "backend_endpoint": wait_for_endpoint(backend),
@@ -155,7 +159,7 @@ def main() -> None:
         (args.output_dir / "services.json").write_text(
             json.dumps(manifest, indent=2) + "\n"
         )
-        logger.info("Local LIBERO services ready: %s", manifest)
+        logger.info("Local %s services ready: %s", args.simulator, manifest)
         while True:
             time.sleep(1)
             for daemon in daemons:
