@@ -22,6 +22,23 @@ from robots.rl.rl_episode import parse_args, start_environment  # noqa: E402
 from rpent.utils.logging import init_output_dir  # noqa: E402
 
 
+def test_pick_cube_uses_rlinf_env():
+    from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
+    from robots.rl.maniskill import _make_env
+
+    env, task = _make_env("PickCube-v1", None, 1, seed=7)
+    with contextlib.closing(env):
+        assert task == "PickCube-v1"
+        assert isinstance(env, ManiskillEnv)
+        assert env.seed == 7
+        obs, _ = env.reset()
+        assert obs["sensor_data"]["base_camera"]["rgb"].ndim == 3
+        _, reward, _, truncated, info = env.step(env.action_space.sample())
+        assert bool(truncated)
+        assert int(info["episode"]["episode_len"]) == 1
+        assert float(info["episode"]["return"]) == pytest.approx(float(reward))
+
+
 @pytest.mark.parametrize("env_id", sorted(REGISTERED_ENVS))
 def test_native_environment_through_episode_entrypoint(env_id, tmp_path):
     """Exercise the same tools and task routing used by RLinf's episode worker."""

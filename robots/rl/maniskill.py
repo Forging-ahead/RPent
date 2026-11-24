@@ -25,14 +25,22 @@ def _json(value):
         return {name: _json(item) for name, item in value.items()}
     if isinstance(value, (np.ndarray, np.generic)):
         return value.tolist()
+    if hasattr(value, "detach"):
+        return value.item() if value.numel() == 1 else value.tolist()
     return value
 
 
-def _make_env(task_name: str, render_device: int | None, max_episode_steps: int | None):
-    import gymnasium as gym
+def _make_env(
+    task_name: str,
+    render_device: int | None,
+    max_episode_steps: int | None,
+    seed: int = 0,
+):
     import mani_skill.envs  # noqa: F401 - imports native task registrations
+    from mani_skill.utils import common
     from mani_skill.utils.registration import REGISTERED_ENVS
-    from mani_skill.utils.wrappers.gymnasium import CPUGymWrapper
+    from omegaconf import OmegaConf
+    from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
 
     env_id = "PickCube-v1" if task_name == "pick_cube" else task_name
     if env_id not in REGISTERED_ENVS:
@@ -48,25 +56,51 @@ def _make_env(task_name: str, render_device: int | None, max_episode_steps: int 
         if max_episode_steps < 1:
             raise ValueError("max_episode_steps must be positive")
         horizon = min(horizon, max_episode_steps) if horizon else max_episode_steps
+
+    class RPentManiskillEnv(ManiskillEnv):
+        def _wrap_obs(self, raw_obs, infos=None):
+            # RPent records individual camera frames and their calibration.
+            return common.unbatch(common.to_numpy(raw_obs))
+
+        @property
+        def unwrapped(self):
+            return self.env.unwrapped
+
+        def close(self):
+            self.env.close()
+
+    cfg = OmegaConf.create(
+        {
+            "seed": seed,
+            "group_size": 1,
+            "auto_reset": False,
+            "use_fixed_reset_state_ids": False,
+            "ignore_terminations": False,
+            "reward_mode": "raw",
+            "use_rel_reward": False,
+            "video_cfg": {"info_on_video": False},
+            "init_params": {
+                "id": env_id,
+                "obs_mode": mode,
+                "sim_backend": "physx_cpu",
+                "render_backend": "gpu"
+                if render_device is None
+                else f"cuda:{render_device}",
+                "max_episode_steps": horizon,
+            },
+        }
+    )
     try:
-        env = gym.make(
-            env_id,
-            num_envs=1,
-            obs_mode=mode,
-            sim_backend="physx_cpu",
-            render_backend="gpu" if render_device is None else f"cuda:{render_device}",
-            max_episode_steps=horizon,
+        env = RPentManiskillEnv(
+            cfg, num_envs=1, seed_offset=0, total_num_processes=1, worker_info=None
         )
     except (EOFError, SystemExit) as e:
         raise RuntimeError(
             f"ManiSkill could not initialize {env_id}; check its required assets"
         ) from e
-    try:
-        env = CPUGymWrapper(env, record_metrics=True)
-        return env, env_id
-    except BaseException:
-        env.close()
-        raise
+    env.action_space = env.env.action_space
+    env.spec = env.env.spec
+    return env, env_id
 
 
 class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
@@ -91,7 +125,9 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         self._mask_ids = itertools.count(1)
         self._masks = {}
         self.frames = []
-        self.env, self.env_id = _make_env(task_name, render_device, max_episode_steps)
+        self.env, self.env_id = _make_env(
+            task_name, render_device, max_episode_steps, seed
+        )
         try:
             self._obs, self._info = self.env.reset(seed=seed)
             self.env_steps = 0

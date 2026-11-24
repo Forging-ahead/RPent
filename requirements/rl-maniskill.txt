@@ -1,4 +1,5 @@
 -e .
 mani_skill==3.0.0b22
+omegaconf
 svgpathtools
 transformers==4.57.6
