@@ -14,7 +14,13 @@ import numpy as np
 from robots.rl.backends import MeasuredMobileMotion
 from robots.rl.coordinates import Coordinates
 from robots.rl.geometry import world_from_depth
-from robots.rl.maniskill_arm import ManiSkillArm, UnsupportedRobotPolicy, transform
+from robots.rl.maniskill_arm import (
+    ManiSkillArm,
+    UnsupportedRobotPolicy,
+    floating_hand,
+    g1_arms,
+    transform,
+)
 from robots.rl.perception import RecordedPerception
 from robots.rl.tools import ControlConfig
 from rpent.session import EnvState, StepRecord
@@ -136,8 +142,9 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
             self.terminated = self.truncated = False
             native = self.env.unwrapped
             group = getattr(native.agent, "agents_dict", None)
-            self.dual_arm = group is not None
-            if self.dual_arm:
+            self.agent_keys = None
+            self._mount_forward_axis = 0
+            if group is not None:
                 if (
                     len(group) != 2
                     or not hasattr(native, "left_agent")
@@ -154,8 +161,18 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                     side: next(k for k, v in group.items() if v is arm.agent)
                     for side, arm in self.arms.items()
                 }
+            elif native.agent.uid in {
+                "unitree_g1_simplified_upper_body",
+                "unitree_g1_simplified_upper_body_with_head_camera",
+            }:
+                self.arms = g1_arms(self, native.agent)
+            elif native.agent.uid == "floating_ability_hand_right":
+                self.arms = {"arm": floating_hand(self, native.agent)}
+                # The floating hand's fixed root has its +X axis pointing down.
+                self._mount_forward_axis = 2
             else:
                 self.arms = {"arm": ManiSkillArm(self, native.agent)}
+            self.dual_arm = len(self.arms) == 2
             self.mobile = not self.dual_arm and native.agent.uid == "fetch"
             if self.mobile:
                 arm = self.arms["arm"]
@@ -256,7 +273,7 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         if self.dual_arm:
             forward = np.cross(mounts[0][:3, 3] - mounts[1][:3, 3], up)
         else:
-            forward = mounts[0][:3, 0].copy()
+            forward = mounts[0][:3, self._mount_forward_axis].copy()
         forward[2] = 0
         if np.linalg.norm(forward) < 1e-6:
             raise ValueError("Cannot determine horizontal arm mounting frame")
@@ -311,12 +328,12 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         if self.ended:
             raise RuntimeError("ManiSkill episode has ended")
         # Explicit batch dimensions remain valid after an official control-mode switch.
-        if self.dual_arm:
+        if self.agent_keys is not None:
             action = {
                 self.agent_keys[k]: arm.last[None, :] for k, arm in self.arms.items()
             }
         else:
-            action = self.arms["arm"].last[None, :]
+            action = next(iter(self.arms.values())).last[None, :]
         obs, reward, terminated, truncated, info = self.env.step(action)
         self._obs, self._info = obs, info
         self.terminated, self.truncated = bool(terminated), bool(truncated)

@@ -228,31 +228,34 @@ class ManiSkillArm(CartesianServo):
         # SO100's grasp centre follows the moving jaw. Re-measure the link offset each step.
         link_target = target @ np.linalg.solve(self._tcp(), transform(self.ee.pose))
         command = self.last.copy()
-        if self.joint_ik:
-            import sapien
+        self._command_pose(command, link_target)
+        if self.has_gripper:
+            self._command_gripper(command, self.opening_target, 0, True)
+        return command, float(np.linalg.norm(delta)), float(np.linalg.norm(error))
 
-            qpos = np.asarray(self.robot.get_qpos())[0]
-            goal = np.linalg.solve(transform(self.robot.root.pose), link_target)
-            solution, _, _ = self.pin.compute_inverse_kinematics(
-                _index(self.ee),
-                sapien.Pose(goal),
-                initial_qpos=qpos,
-                active_qmask=self.arm_mask,
-                max_iterations=100,
-            )
+    def _joint_target(self, link_target):
+        import sapien
+
+        goal = np.linalg.solve(transform(self.robot.root.pose), link_target)
+        solution, _, _ = self.pin.compute_inverse_kinematics(
+            _index(self.ee),
+            sapien.Pose(goal),
+            initial_qpos=np.asarray(self.robot.get_qpos())[0],
+            active_qmask=self.arm_mask,
+            max_iterations=100,
+        )
+        return solution
+
+    def _command_pose(self, command, link_target):
+        if self.joint_ik:
             joints = np.asarray(self.arm.active_joint_indices)
-            # Underactuated arms may only approach a target. The shared servo
-            # reports the remaining error from the next measured pose.
             command[self.slices["arm"]] = np.clip(
-                solution[joints],
+                self._joint_target(link_target)[joints],
                 self.arm.single_action_space.low,
                 self.arm.single_action_space.high,
             )
         else:
             command[self.slices["arm"]] = self._cartesian_input(link_target)
-        if self.has_gripper:
-            self._command_gripper(command, self.opening_target, 0, True)
-        return command, float(np.linalg.norm(delta)), float(np.linalg.norm(error))
 
     def _command_gripper(self, action, opening, error, within):
         self.opening_target = opening
@@ -271,3 +274,118 @@ class ManiSkillArm(CartesianServo):
     def _step(self, action):
         self.last = action
         self.episode.step_controllers()
+
+
+class ManiSkillJointArm(ManiSkillArm):
+    """Use selected channels of an absolute joint-position controller."""
+
+    def __init__(
+        self, episode, agent, tcp, mount, targets, channels, arm, fingers, axes
+    ):
+        self.episode = episode
+        self._config = episode._config
+        self.robot = agent.robot
+        self.ee, self.mount = tcp, mount
+        self.last = targets
+        joints = self.robot.active_joints_map
+        self.arm_slots = [channels[n] for n in arm]
+        self.arm_indices = [int(np.asarray(joints[n].active_index).item()) for n in arm]
+        self.arm_mask = np.isin(np.arange(self.robot.dof[0]), self.arm_indices)
+        self.pin = self.robot.create_pinocchio_model()
+        self.limits = np.asarray(self.robot.get_qlimits())[0, self.arm_indices]
+        self.has_gripper = True
+        self.finger_slots = [channels[n] for n in fingers]
+        self.finger_indices = [
+            int(np.asarray(joints[n].active_index).item()) for n in fingers
+        ]
+        limits = np.asarray(self.robot.get_qlimits())[0, self.finger_indices]
+        # Both robots use zero as their open pose. Flex toward the longer travel.
+        self.closed = (
+            0.7
+            * np.take_along_axis(
+                limits, np.abs(limits).argmax(axis=1, keepdims=True), axis=1
+            )[:, 0]
+        )
+        self.tool_rotation = grasp_axes(*axes)
+        self.opening_target = self._opening()
+
+    def _tcp(self):
+        return transform(self.ee.pose)
+
+    def _opening(self):
+        qpos = np.asarray(self.robot.get_qpos())[0, self.finger_indices]
+        return float(
+            np.clip(1 - qpos @ self.closed / (self.closed @ self.closed), 0, 1)
+        )
+
+    def _command_gripper(self, action, opening, error, within):
+        self.opening_target = opening
+        action[self.finger_slots] = (1 - opening) * self.closed
+
+    def _command_pose(self, command, link_target):
+        command[self.arm_slots] = np.clip(
+            self._joint_target(link_target)[self.arm_indices],
+            self.limits[:, 0],
+            self.limits[:, 1],
+        )
+
+    def _step(self, action):
+        # G1's two arms share the body target vector.
+        self.last[:] = action
+        self.episode.step_controllers()
+
+
+def g1_arms(episode, agent):
+    agent.set_control_mode("pd_joint_pos")
+    agent.controller.reset()
+    body = agent.controller.controllers["body"]
+    targets = np.asarray(body.qpos)[0].copy()
+    channels = {joint.name: i for i, joint in enumerate(body.joints)}
+    arms = {}
+    for side in ("left", "right"):
+        arm = [
+            name
+            for name in channels
+            if name.startswith((f"{side}_shoulder", f"{side}_elbow"))
+        ]
+        arms[side] = ManiSkillJointArm(
+            episode,
+            agent,
+            getattr(agent, f"{side}_tcp"),
+            agent.robot.active_joints_map[arm[0]].child_link,
+            targets,
+            channels,
+            arm,
+            getattr(agent, f"{side}_finger_joints"),
+            ([0, 1, 0], [1, 0, 0]),
+        )
+    return arms
+
+
+def floating_hand(episode, agent):
+    agent.set_control_mode("pd_joint_pos")
+    agent.controller.reset()
+    controller = agent.controller
+    channels = {}
+    for name, part in controller.controllers.items():
+        offset, _ = controller.action_mapping[name]
+        indices = getattr(part, "control_joint_indices", range(len(part.joints)))
+        channels.update(
+            (part.joints[int(j)].name, offset + i) for i, j in enumerate(indices)
+        )
+    positions = np.asarray(agent.robot.get_qpos())[0]
+    targets = np.zeros(agent.single_action_space.shape, dtype=np.float32)
+    for name, index in channels.items():
+        joint = agent.robot.active_joints_map[name]
+        targets[index] = positions[int(np.asarray(joint.active_index).item())]
+    return ManiSkillJointArm(
+        episode,
+        agent,
+        agent.robot.links_map[agent.ee_link_name],
+        agent.robot.root,
+        targets,
+        channels,
+        agent.root_joint_names,
+        [n for n in channels if n not in agent.root_joint_names],
+        ([1, 0, 0], [0, 0, 1]),
+    )
