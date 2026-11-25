@@ -1,7 +1,7 @@
 机器人 Episode
 ==============
 
-用同一套 episode 在 LIBERO、RoboTwin、RoboCasa、RoboDojo 和 ManiSkill 中运行模型。ManiSkill 复用机械臂的公共动作接口，读取任务自身的策略相机。模型通过 ``execute_actions`` 执行动作，通过 ``view_env`` 获取策略相机图像。
+用同一套 episode 在 LIBERO、RoboTwin、RoboCasa、RoboDojo 和 ManiSkill 中运行模型。ManiSkill 按任务的机器人选择动作。模型通过 ``execute_actions`` 执行动作，有策略相机时可通过 ``view_env`` 取图。
 
 安装仿真环境
 ------------
@@ -57,12 +57,14 @@ RoboTwin、RoboCasa 和 RoboDojo 使用 ``--simulator`` 和 ``--task-name``。Ro
 
 ManiSkill 直接接受注册的 Gymnasium 任务 ID。例如，运行双臂任务可用
 ``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``。
-初始观测给出实测末端位姿。夹爪机械臂使用 ``move_to`` 和 ``set_gripper``，双臂任务指定左右臂，画笔只使用 ``move_to``。一个目标可以推进多个仿真步。步行和独立手指控制需要另外定义动作。
-视觉工具使用任务实际提供的策略相机和观测字段，SAM3 为可选服务。轨迹保存原生累计回报，
+对于机械臂，初始观测给出实测末端位姿。夹爪机械臂使用 ``move_to`` 和 ``set_gripper``，双臂任务指定左右臂，画笔使用 ``move_to``。行走、平衡和独立手指机器人通过同一个 ``execute_actions`` 工具调用 ``drive_joints``，按观测中的关节顺序提供归一化控制量和控制步数。
+
+环境采用任务注册时定义的最大步数。策略相机按 512 × 512 渲染。视频保存初始画面和每个原生控制步的画面，以 20 fps 编码。对于没有策略相机的任务，模型读取实测状态，视频使用旁观相机。
+SAM3 为可选服务。轨迹保存原生累计回报，
 有成功判据时记录其值，缺少判据时保存为 JSON ``null``。
 
 在仿真服务器运行 ``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``
-可逐个验收所有注册任务。每项测试会重置环境、读取可用的策略相机，并通过 RPent 执行末端移动。不具备对应动作映射的机器人单列为跳过。
+可逐个验收所有注册任务。每项测试会重置环境、读取可用的策略相机，并通过 RPent 执行该机器人的动作。不具备对应动作映射的机器人单列为跳过。
 
 提供训练工具服务
 ----------------

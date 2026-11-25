@@ -22,6 +22,23 @@ from robots.rl.rl_episode import parse_args, start_environment  # noqa: E402
 from rpent.utils.logging import init_output_dir  # noqa: E402
 
 
+@pytest.fixture
+def open_episode(tmp_path):
+    """Start a real episode through the CLI contract and release it after the test."""
+    init_output_dir(tmp_path)
+    with contextlib.ExitStack() as release:
+
+        def start(env_id, *, seed=0):
+            task = {"environment": "maniskill", "task_name": env_id, "seed": seed}
+            request = tmp_path / "request.json"
+            request.write_text(json.dumps({"task": task}))
+            argv = ["--output-dir", str(tmp_path), "--request", str(request)]
+            toolkit, _ = start_environment(parse_args(argv), task, release)
+            return toolkit
+
+        yield start
+
+
 def test_pick_cube_uses_rlinf_env():
     from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
 
@@ -33,11 +50,26 @@ def test_pick_cube_uses_rlinf_env():
         assert isinstance(env, ManiskillEnv)
         assert env.seed == 7
         obs, _ = env.reset()
-        assert obs["sensor_data"]["base_camera"]["rgb"].ndim == 3
+        assert obs["sensor_data"]["base_camera"]["rgb"].shape == (512, 512, 3)
         _, reward, _, truncated, info = env.step(env.action_space.sample())
         assert bool(truncated)
         assert int(info["episode"]["episode_len"]) == 1
         assert float(info["episode"]["return"]) == pytest.approx(float(reward))
+
+
+def test_pick_cube_reports_native_goal_in_the_planner_frame(open_episode):
+    toolkit = open_episode("PickCube-v1", seed=7)
+    observation = toolkit.initial_observation().data
+    primitives = toolkit._primitives
+    assert (
+        primitives.env.cfg.init_params.max_episode_steps
+        == REGISTERED_ENVS["PickCube-v1"].max_episode_steps
+    )
+    native_goal = primitives.env.unwrapped.goal_site.pose.p[0].cpu().numpy()
+    expected_cm = 100 * primitives.coordinates.points(native_goal)
+    assert observation["state"]["goal"]["xyz"] == pytest.approx(expected_cm, abs=0.01)
+    assert observation["state"]["is_grasped"] is False
+    assert observation["state"]["cube_size_cm"] == pytest.approx(4)
 
 
 @pytest.mark.parametrize(
@@ -93,126 +125,109 @@ def test_fetch_base_and_lift_use_effective_episode_budget(tmp_path, horizon):
     "env_id",
     ["UnitreeG1PlaceAppleInBowl-v1", "UnitreeG1TransportBox-v1", "InsertFlower-v1"],
 )
-def test_cartesian_tools_on_native_joint_controllers(env_id, tmp_path):
+def test_cartesian_tools_on_native_joint_controllers(env_id, open_episode):
     import numpy as np
 
     from robots.rl.geometry import rpy_of
     from robots.rl.maniskill_arm import transform
 
-    task = {"environment": "maniskill", "task_name": env_id, "seed": 0}
-    request = tmp_path / "request.json"
-    request.write_text(json.dumps({"task": task}))
-    args = parse_args(
-        [
-            "--output-dir",
-            str(tmp_path),
-            "--request",
-            str(request),
-            "--max-episode-steps",
-            "150",
-        ]
-    )
-    init_output_dir(tmp_path)
-    with contextlib.ExitStack() as release:
-        kit, _ = start_environment(args, task, release)
-        opening = kit.initial_observation().data
-        cameras = opening["sensors"]["rgb_cameras"]
-        assert cameras
-        for camera in cameras:
-            assert len(kit.execute_tool("view_env", {"camera": camera}).images) == 1
-        state = opening["state"]
-        backend = kit._primitives
-        for side, arm in backend.arms.items():
-            selector = {"arm": side} if backend.dual_arm else {}
-            if backend.dual_arm:
-                # Each G1 arm has five joints. Generate a reachable full pose.
-                robot = arm.robot
-                qpos = np.asarray(robot.get_qpos())[0].copy()
-                joint = robot.active_joints_map[f"{side}_elbow_pitch_joint"]
-                angle = -0.12 if env_id == "UnitreeG1TransportBox-v1" else 0.12
-                qpos[int(np.asarray(joint.active_index).item())] += angle
-                arm.pin.compute_forward_kinematics(qpos)
-                pose = (
-                    transform(robot.root.pose)
-                    @ arm.pin.get_link_pose(
-                        int(np.asarray(arm.ee.index).item())
-                    ).to_transformation_matrix()
-                )
-                xyz = (100 * backend.coordinates.points(pose[:3, 3])).tolist()
-                rpy = rpy_of(
-                    backend.coordinates.orientation(pose[:3, :3] @ arm.tool_rotation)
-                )
-                move = {"xyz": xyz, "orientation_rpy": rpy}
-                other = "right" if side == "left" else "left"
-                held = state[other]["pose"]["xyz"]
-            else:
-                x, y, z = state["pose"]["xyz"]
-                move = {"xyz": [x, y, z + 2]}
-            outcome = kit.execute_tool(
-                "execute_actions",
-                {
-                    "actions": [
-                        {"action": "move_to", **selector, **move},
-                        {"action": "set_gripper", **selector, "opening": 0.5},
-                    ]
-                },
-            ).data
-            assert [r["status"] for r in outcome["results"]] == [
-                "reached",
-                "reached",
-            ], outcome
-            state = outcome["final_state"]
-            measured = state[side] if backend.dual_arm else state
-            assert measured["opening"] == pytest.approx(0.5, abs=0.08)
-            if backend.dual_arm:
-                np.testing.assert_allclose(state[other]["pose"]["xyz"], held, atol=0.3)
+    kit = open_episode(env_id)
+    opening = kit.initial_observation().data
+    cameras = opening["sensors"]["rgb_cameras"]
+    assert cameras
+    for camera in cameras:
+        assert len(kit.execute_tool("view_env", {"camera": camera}).images) == 1
+    state = opening["state"]
+    backend = kit._primitives
+    for side, arm in backend.arms.items():
+        selector = {"arm": side} if backend.dual_arm else {}
+        if backend.dual_arm:
+            # Each G1 arm has five joints. Generate a reachable full pose.
+            robot = arm.robot
+            qpos = np.asarray(robot.get_qpos())[0].copy()
+            joint = robot.active_joints_map[f"{side}_elbow_pitch_joint"]
+            angle = -0.12 if env_id == "UnitreeG1TransportBox-v1" else 0.12
+            qpos[int(np.asarray(joint.active_index).item())] += angle
+            arm.pin.compute_forward_kinematics(qpos)
+            pose = (
+                transform(robot.root.pose)
+                @ arm.pin.get_link_pose(
+                    int(np.asarray(arm.ee.index).item())
+                ).to_transformation_matrix()
+            )
+            xyz = (100 * backend.coordinates.points(pose[:3, 3])).tolist()
+            rpy = rpy_of(
+                backend.coordinates.orientation(pose[:3, :3] @ arm.tool_rotation)
+            )
+            move = {"xyz": xyz, "orientation_rpy": rpy}
+            other = "right" if side == "left" else "left"
+            held = state[other]["pose"]["xyz"]
+        else:
+            x, y, z = state["pose"]["xyz"]
+            move = {"xyz": [x, y, z + 2]}
+        outcome = kit.execute_tool(
+            "execute_actions",
+            {
+                "actions": [
+                    {"action": "move_to", **selector, **move},
+                    {"action": "set_gripper", **selector, "opening": 0.5},
+                ]
+            },
+        ).data
+        assert [r["status"] for r in outcome["results"]] == [
+            "reached",
+            "reached",
+        ], outcome
+        state = outcome["final_state"]
+        measured = state[side] if backend.dual_arm else state
+        assert measured["opening"] == pytest.approx(0.5, abs=0.08)
+        if backend.dual_arm:
+            np.testing.assert_allclose(state[other]["pose"]["xyz"], held, atol=0.3)
 
 
 @pytest.mark.parametrize("env_id", sorted(REGISTERED_ENVS))
-def test_native_environment_through_episode_entrypoint(env_id, tmp_path):
+def test_native_environment_through_episode_entrypoint(
+    env_id, open_episode, monkeypatch
+):
     """Exercise the same tools and task routing used by RLinf's episode worker."""
-    task = {"environment": "maniskill", "task_name": env_id, "seed": 0}
-    request = tmp_path / "request.json"
-    request.write_text(json.dumps({"task": task}))
-    args = parse_args(
-        [
-            "--output-dir",
-            str(tmp_path),
-            "--request",
-            str(request),
-            "--max-episode-steps",
-            "1",
-        ]
-    )
-    init_output_dir(tmp_path)
-    with contextlib.ExitStack() as release:
-        try:
-            toolkit, _ = start_environment(args, task, release)
-        except UnsupportedRobotPolicy as exc:
-            # Report unmapped embodiments separately from native installation or controller failures.
-            if "no mapped arm" in str(exc):
-                pytest.skip(str(exc))
-            raise
-        opening = toolkit.initial_observation().data
-        caps = opening["sensors"]
-        tools = {definition.name for definition in toolkit.list_tools()}
-        assert ("view_env" in tools) == bool(caps["rgb_cameras"])
-        assert ("back_project" in tools) == bool(caps["depth_cameras"])
-        for camera in caps["rgb_cameras"]:
-            response = toolkit.execute_tool("view_env", {"camera": camera})
-            assert len(response.images) == 1, response.data
+    # A one-step registered horizon exercises native truncation inside this test only.
+    monkeypatch.setattr(REGISTERED_ENVS[env_id], "max_episode_steps", 1)
+    try:
+        toolkit = open_episode(env_id)
+    except UnsupportedRobotPolicy as exc:
+        # Report unmapped embodiments separately from native installation or controller failures.
+        if "no mapped arm" in str(exc):
+            pytest.skip(str(exc))
+        raise
+    opening = toolkit.initial_observation().data
+    caps = opening["sensors"]
+    tools = {definition.name for definition in toolkit.list_tools()}
+    assert ("view_env" in tools) == bool(caps["rgb_cameras"])
+    assert ("back_project" in tools) == bool(caps["depth_cameras"])
+    for camera in caps["rgb_cameras"]:
+        response = toolkit.execute_tool("view_env", {"camera": camera})
+        assert len(response.images) == 1, response.data
 
-        state = opening["state"]
+    state = opening["state"]
+    if "joint_control" in caps:
+        count = len(caps["joint_control"]["action_order"])
+        move = {"action": "drive_joints", "values": [0.25] * count}
+        invalid = {**move, "values": [0] * (count + 1)}
+        rejected = toolkit.execute_tool("execute_actions", {"actions": [move, invalid]})
+        assert "error" in rejected.data and toolkit._primitives.env_steps == 0
+    else:
         pose = state["left"]["pose"] if caps["dual_arm"] else state["pose"]
         x, y, z = pose["xyz"]
         move = {"action": "move_to", "xyz": [x, y, z + 2]}
         if caps["dual_arm"]:
             move["arm"] = "left"
-        actions = [move, move]
-        outcome = toolkit.execute_tool("execute_actions", {"actions": actions})
-        assert outcome.data.get("executed_count") == 1, outcome.data
-        metrics = toolkit.native_outcome()
-        assert metrics["terminated"] or metrics["truncated"]
-        assert metrics["success"] is None or type(metrics["success"]) is bool
-        assert math.isfinite(metrics["episode_return"])
-        assert toolkit.state.latest_record().extras["env_steps"] == 1
+    actions = [move, move]
+    outcome = toolkit.execute_tool("execute_actions", {"actions": actions})
+    assert outcome.data.get("executed_count") == 1, outcome.data
+    if "joint_control" in caps:
+        assert outcome.data["final_state"]["joint_position"] != state["joint_position"]
+    metrics = toolkit.native_outcome()
+    assert metrics["terminated"] or metrics["truncated"]
+    assert metrics["success"] is None or type(metrics["success"]) is bool
+    assert math.isfinite(metrics["episode_return"])
+    assert toolkit.state.latest_record().extras["env_steps"] == 1

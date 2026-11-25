@@ -46,6 +46,38 @@ def system_prompt(variables: Mapping[str, object] | None = None) -> str:
     return CENTIMETERS.description("\n\n".join(sections))
 
 
+def joint_prompt(toolkit) -> str:
+    """Describe only the native joint actions and policy sensors this episode exposes."""
+    from robots.rl.contracts import argument_hint
+
+    tools = {tool.name: tool for tool in toolkit.list_tools()}
+    sections = [
+        "Complete the task using its measured state and the available tools. "
+        "The environment judges success. Issue one tool call per reply.",
+        "Use execute_actions to drive the body or finger joints. The initial joint_control "
+        "describes action_order, state_order and the native maximum delta per step. "
+        "Read joint_position, joint_velocity and the base pose after each command. "
+        "The base frame starts at the initial base origin and heading. "
+        "Use small adjustments and check their measured effect.",
+        argument_hint("execute_actions", "maniskill", tools["execute_actions"]),
+    ]
+    if "view_env" in tools:
+        sections.append("Use view_env to see the current named policy camera images.")
+    if "segment" in tools:
+        sections.append("Use segment to locate a visible object.")
+    if "back_project" in tools:
+        sections.append(
+            "Use back_project with the source camera and capture step to measure a visible point."
+        )
+    sections.append(
+        f"Batch up to {toolkit.max_actions_per_call} actions in order. The simulation "
+        "may stop early. Use the executed step count and measured outcome for the next action."
+    )
+    if not toolkit.reasoning:
+        sections.append("Call the next tool directly without explanatory text.")
+    return "\n\n".join(sections)
+
+
 def user_prompt(variables: Mapping[str, object] | None = None) -> str:
     """Introduce the task and initial measured state."""
     return "The task and the measured initial state follow."

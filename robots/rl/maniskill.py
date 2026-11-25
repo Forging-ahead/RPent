@@ -5,15 +5,13 @@
 from __future__ import annotations
 
 import inspect
-import itertools
 from collections.abc import Callable
-from typing import Any
 
 import numpy as np
 
 from robots.rl.backends import MeasuredMobileMotion
-from robots.rl.coordinates import Coordinates
-from robots.rl.geometry import world_from_depth
+from robots.rl.coordinates import Coordinates, dual_arm_mount, horizontal_rotation
+from robots.rl.geometry import opencv_calibration, world_from_depth
 from robots.rl.maniskill_arm import (
     ManiSkillArm,
     UnsupportedRobotPolicy,
@@ -21,9 +19,10 @@ from robots.rl.maniskill_arm import (
     g1_arms,
     transform,
 )
+from robots.rl.maniskill_joints import JOINT_ROBOTS, ManiSkillJointDrive
 from robots.rl.perception import RecordedPerception
 from robots.rl.tools import ControlConfig
-from rpent.session import EnvState, StepRecord
+from rpent.session import EnvState
 
 
 def _json(value):
@@ -43,10 +42,14 @@ def _make_env(
     seed: int = 0,
 ):
     import mani_skill.envs  # noqa: F401 - imports native task registrations
+    from mani_skill.sensors.camera import parse_camera_configs
     from mani_skill.utils import common
     from mani_skill.utils.registration import REGISTERED_ENVS
     from omegaconf import OmegaConf
     from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
+    from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
+        resolve_maniskill_task_descriptions,
+    )
 
     env_id = "PickCube-v1" if task_name == "pick_cube" else task_name
     if env_id not in REGISTERED_ENVS:
@@ -64,6 +67,12 @@ def _make_env(
         horizon = min(horizon, max_episode_steps) if horizon else max_episode_steps
 
     class RPentManiskillEnv(ManiskillEnv):
+        @property
+        def instruction(self):
+            return resolve_maniskill_task_descriptions(
+                self.unwrapped, num_envs=1, is_peg_insertion_side=False
+            )[0]
+
         def _wrap_obs(self, raw_obs, infos=None):
             # RPent records individual camera frames and their calibration.
             return common.unbatch(common.to_numpy(raw_obs))
@@ -93,6 +102,8 @@ def _make_env(
                 if render_device is None
                 else f"cuda:{render_device}",
                 "max_episode_steps": horizon,
+                "sensor_configs": {"width": 512, "height": 512},
+                "human_render_camera_configs": {"width": 512, "height": 512},
             },
         }
     )
@@ -104,6 +115,23 @@ def _make_env(
         raise RuntimeError(
             f"ManiSkill could not initialize {env_id}; check its required assets"
         ) from e
+    native = env.unwrapped
+    # Bridge's calibrated camera and real-image overlay must cover the same rays.
+    # FoV cameras derive their intrinsics directly from the actual render size.
+    if any(c.intrinsic is not None for c in native._sensor_configs.values()):
+        try:
+            defaults = parse_camera_configs(native._default_sensor_configs)
+            defaults.update(parse_camera_configs(native.agent._sensor_configs))
+            for name, camera in defaults.items():
+                if camera.intrinsic is not None:
+                    scale = np.diag([512 / camera.width, 512 / camera.height, 1])
+                    native._custom_sensor_configs[name] = {
+                        "intrinsic": scale @ camera.intrinsic
+                    }
+            env.reset(seed=seed, options={"reconfigure": True})
+        except BaseException:
+            env.close()
+            raise
     env.action_space = env.env.action_space
     env.spec = env.env.spec
     return env, env_id
@@ -123,25 +151,33 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         render_device: int | None = None,
         max_episode_steps: int | None = None,
     ) -> None:
-        self._state = state
+        self._init_perception(state, sam3_client)
         self._check_cancelled = check_cancelled
-        self._sam3 = sam3_client
         self._config = ControlConfig()
-        self._sam_calls = itertools.count(1)
-        self._mask_ids = itertools.count(1)
-        self._masks = {}
         self.frames = []
         self.env, self.env_id = _make_env(
             task_name, render_device, max_episode_steps, seed
         )
         try:
             self._obs, self._info = self.env.reset(seed=seed)
+            sensors = self._obs.get("sensor_data", {})
+            params = self._obs.get("sensor_param", {})
+            self.cameras = tuple(
+                name for name, data in sensors.items() if "rgb" in data
+            )
+            self.depth_cameras = tuple(
+                name
+                for name in self.cameras
+                if "depth" in sensors[name]
+                and {"intrinsic_cv", "extrinsic_cv"} <= params.get(name, {}).keys()
+            )
             self.env_steps = 0
             self.episode_return = 0.0
             self.reward = None
             self.terminated = self.truncated = False
             native = self.env.unwrapped
             group = getattr(native.agent, "agents_dict", None)
+            self.joint_drive = None
             self.agent_keys = None
             self._mount_forward_axis = 0
             if group is not None:
@@ -166,6 +202,9 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                 "unitree_g1_simplified_upper_body_with_head_camera",
             }:
                 self.arms = g1_arms(self, native.agent)
+            elif native.agent.uid in JOINT_ROBOTS:
+                self.joint_drive = ManiSkillJointDrive(native.agent)
+                self.arms = {}
             elif native.agent.uid == "floating_ability_hand_right":
                 self.arms = {"arm": floating_hand(self, native.agent)}
                 # The floating hand's fixed root has its +X axis pointing down.
@@ -197,17 +236,16 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                         },
                     },
                 }
-            self.has_gripper = all(arm.has_gripper for arm in self.arms.values())
+            self.has_gripper = bool(self.arms) and all(
+                arm.has_gripper for arm in self.arms.values()
+            )
             table = getattr(getattr(native, "table_scene", None), "table", None)
             mesh = table.get_first_collision_mesh() if table is not None else None
             self.table_z = None if mesh is None else float(mesh.bounds[1, 2])
             self._refresh_coordinates()
             state.save("coordinates.json", self.coordinates.metadata(), step=None)
-            instruction = getattr(native, "get_language_instruction", None)
-            if instruction is not None:
-                value = instruction()
-                self.task = value if isinstance(value, str) else value[0]
-            else:
+            self.task = self.env.instruction
+            if not self.task:
                 doc = inspect.cleandoc(type(native).__doc__ or "")
                 description = (
                     doc.removeprefix("**Task Description:**").strip().split("\n\n")[0]
@@ -215,27 +253,20 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                 self.task = (
                     f"{self.env_id}: {description}" if description else self.env_id
                 )
+            if self.env_id == "PickCube-v1":
+                self.task += (
+                    " The wrist starts pointing down. Omit orientation_rpy from "
+                    "move_to to keep that orientation. Use the segmented cube's x and y. "
+                    "For the grasp height, add half of cube_size_cm to "
+                    "table_height_above_base_cm. "
+                    "The initial wrist pose is already a clear hover. Move directly "
+                    "to the grasp position, then close. Once is_grasped is true, "
+                    "carry the cube centre directly to goal.xyz and hold it still "
+                    "with the gripper closed."
+                )
         except BaseException:
             self.env.close()
             raise
-
-    @property
-    def cameras(self) -> tuple[str, ...]:
-        return tuple(
-            name
-            for name, data in self._obs.get("sensor_data", {}).items()
-            if "rgb" in data
-        )
-
-    @property
-    def depth_cameras(self) -> tuple[str, ...]:
-        params = self._obs.get("sensor_param", {})
-        return tuple(
-            name
-            for name in self.cameras
-            if "depth" in self._obs["sensor_data"][name]
-            and {"intrinsic_cv", "extrinsic_cv"} <= params.get(name, {}).keys()
-        )
 
     @property
     def ended(self) -> bool:
@@ -252,7 +283,18 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
     def native_fail(self) -> bool | None:
         return self._verdict("fail")
 
+    def native_outcome(self) -> dict:
+        return {
+            "success": self.native_success(),
+            "fail": self.native_fail(),
+            "episode_return": self.episode_return,
+            "terminated": self.terminated,
+            "truncated": self.truncated,
+        }
+
     def robot_state(self) -> dict:
+        if self.joint_drive is not None:
+            return self.joint_drive.state(self._obs)
         states = {}
         for name, arm in self.arms.items():
             measured = arm.measure().state()
@@ -264,23 +306,31 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
             states["arm"]["lift_m"] = float(
                 np.asarray(arm.parts["body"].qpos)[0, self._lift_index]
             )
-        return states if self.dual_arm else states["arm"]
+        if self.dual_arm:
+            return states
+        state = states["arm"]
+        if self.env_id == "PickCube-v1":
+            # The goal marker is intentionally hidden from ManiSkill policy cameras.
+            extra = self._obs["extra"]
+            goal = self.coordinates.points(np.asarray(extra["goal_pos"]))
+            state["goal"] = {"xyz": goal.round(4).tolist()}
+            state["is_grasped"] = bool(extra["is_grasped"])
+            state["cube_size_m"] = 2 * self.env.unwrapped.cube_half_size
+        return state
 
     def _refresh_coordinates(self):
+        if self.joint_drive is not None:
+            self.coordinates = self.joint_drive.coordinates
+            return
         mounts = [transform(arm.mount.pose) for arm in self.arms.values()]
-        origin = np.mean([m[:3, 3] for m in mounts], axis=0)
-        up = np.array([0.0, 0.0, 1.0])
         if self.dual_arm:
-            forward = np.cross(mounts[0][:3, 3] - mounts[1][:3, 3], up)
+            origin, rotation = dual_arm_mount(mounts[0][:3, 3], mounts[1][:3, 3])
         else:
-            forward = mounts[0][:3, self._mount_forward_axis].copy()
-        forward[2] = 0
-        if np.linalg.norm(forward) < 1e-6:
-            raise ValueError("Cannot determine horizontal arm mounting frame")
-        forward /= np.linalg.norm(forward)
+            origin = mounts[0][:3, 3].copy()
+            rotation = horizontal_rotation(mounts[0][:3, self._mount_forward_axis])
         coords = Coordinates(
             origin,
-            np.column_stack((forward, np.cross(up, forward), up)),
+            rotation,
             table_height_m=None if self.table_z is None else self.table_z - origin[2],
             tcp="native_grasp_tcp" if self.has_gripper else "native_tool_tip",
         )
@@ -293,6 +343,9 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
 
     def set_gripper(self, *, opening, arm="arm"):
         return self.arms[arm].set_gripper(opening=opening)
+
+    def drive_joints(self, *, values, steps=1):
+        return self.joint_drive.drive(self, values, steps)
 
     def _mobility_state(self):
         from scipy.spatial.transform import Rotation
@@ -308,17 +361,14 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         arm = self.arms["arm"]
         command = arm.last.copy()
         # Fetch has a differential drive and a delta-position torso in pd_joint_pos mode.
-        base = arm.parts["base"]._original_single_action_space
-        body = arm.parts["body"]._original_single_action_space
         twist = np.zeros(2) if velocity is None else np.asarray(velocity)[[0, 2]]
-        command[arm.slices["base"]] = (
-            2 * (twist - base.low) / (base.high - base.low) - 1
-        )
-        delta = np.zeros(body.shape)
+        delta = np.zeros(arm.parts["body"]._original_single_action_space.shape)
         delta[self._lift_index] = lift
-        command[arm.slices["body"]] = (
-            2 * (delta - body.low) / (body.high - body.low) - 1
-        )
+        for name, target in (("base", twist), ("body", delta)):
+            space = arm.parts[name]._original_single_action_space
+            command[arm.slices[name]] = (
+                2 * (target - space.low) / (space.high - space.low) - 1
+            )
         arm.last = command
         self.step_controllers(check_cancelled=check_cancelled)
 
@@ -328,70 +378,62 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         if self.ended:
             raise RuntimeError("ManiSkill episode has ended")
         # Explicit batch dimensions remain valid after an official control-mode switch.
-        if self.agent_keys is not None:
+        if self.joint_drive is not None:
+            action = self.joint_drive.last[None, :]
+        elif self.agent_keys is not None:
             action = {
                 self.agent_keys[k]: arm.last[None, :] for k, arm in self.arms.items()
             }
         else:
             action = next(iter(self.arms.values())).last[None, :]
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        self._obs, self._info = obs, info
+        self._obs, reward, terminated, truncated, self._info = self.env.step(action)
         self.terminated, self.truncated = bool(terminated), bool(truncated)
         self.reward = float(reward)
-        self.episode_return = float(info["episode"]["return"])
-        self.env_steps = int(info["episode"]["episode_len"])
+        episode = self._info["episode"]
+        self.episode_return = float(episode["return"])
+        self.env_steps = int(episode["episode_len"])
 
+        self._record_video_frame()
         self._refresh_coordinates()
 
-    def _save(self, name: str, value: Any, step: int) -> None:
-        if self._state.save(name, value, step=step) is None:
-            raise RuntimeError(f"failed to save observation artifact {name}")
+    def _record_video_frame(self):
+        if self.cameras:
+            self.frames.append(self._obs["sensor_data"][self.cameras[0]]["rgb"].copy())
+        else:
+            # State-only tasks have no policy RGB. Keep spectator renders in the MP4.
+            render = getattr(self.env.unwrapped, "render_rgb_array", None)
+            if render is not None:
+                rgb = render()
+                if rgb is not None:
+                    self.frames.append(np.asarray(rgb[0].cpu()).copy())
 
-    def record_observation(
-        self, *, command=None, result=None, elapsed_s=None
-    ) -> StepRecord:
-        extras = {
-            "env_steps": self.env_steps,
-            "reward": self.reward,
-            "episode_return": self.episode_return,
-            "episode": _json(self._info.get("episode", {})),
-            "success": self.native_success(),
-            "fail": self.native_fail(),
-            "terminated": self.terminated,
-            "truncated": self.truncated,
-        }
-        with self._state.record_step(
-            state=self.robot_state(),
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            terminated=self.terminated,
-            truncated=self.truncated,
-            extras=extras,
-        ) as step:
-            self._save("step_coordinates.json", self.coordinates.metadata(), step)
-            for i, camera in enumerate(self.cameras):
-                data = self._obs["sensor_data"][camera]
-                rgb = data["rgb"]
-                self._save(f"{camera}.png", rgb, step)
-                if i == 0:
-                    self.frames.append(rgb)
-                if camera not in self.depth_cameras:
-                    continue
-                params = self._obs["sensor_param"][camera]
-                # ManiSkill emits OpenCV world-to-camera extrinsics and axial depth in millimetres.
-                extrinsic = np.eye(4)
-                extrinsic[:3] = np.asarray(params["extrinsic_cv"])[:3, :4]
-                calibration = {
-                    "intrinsic_K": params["intrinsic_cv"].tolist(),
-                    "extrinsic_cam2world": np.linalg.inv(extrinsic).tolist(),
-                }
-                depth = np.asarray(data["depth"])
-                if depth.ndim == 3:
-                    depth = depth.squeeze(axis=-1)
-                depth = depth.astype(np.float32) / 1000.0
-                depth[depth <= 0] = np.nan
-                points = world_from_depth(depth, calibration).astype(np.float32)
-                self._save(f"{camera}_world.npz", points, step)
-                self._save(f"{camera}_calibration.json", calibration, step)
-        return self._state.get(step)
+    def _record_status(self):
+        if self.env_steps == 0 and not self.frames:
+            self._record_video_frame()
+        return (
+            self.terminated,
+            self.truncated,
+            {
+                **self.native_outcome(),
+                "env_steps": self.env_steps,
+                "reward": self.reward,
+                "episode": _json(self._info.get("episode", {})),
+            },
+        )
+
+    def _record_camera(self, camera, step, state):
+        data = self._obs["sensor_data"][camera]
+        self._save(f"{camera}.png", data["rgb"], step)
+        if camera in self.depth_cameras:
+            params = self._obs["sensor_param"][camera]
+            calibration = opencv_calibration(
+                params["intrinsic_cv"], params["extrinsic_cv"]
+            )
+            # ManiSkill reports axial depth in millimetres, zero marks missing pixels.
+            depth = np.asarray(data["depth"], dtype=np.float32) / 1000
+            if depth.ndim == 3:
+                depth = depth.squeeze(axis=-1)
+            depth[depth <= 0] = np.nan
+            points = world_from_depth(depth, calibration).astype(np.float32)
+            self._save(f"{camera}_world.npz", points, step)
+            self._save(f"{camera}_calibration.json", calibration, step)

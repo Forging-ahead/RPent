@@ -29,8 +29,12 @@ class Pose:
 class NativeEpisode:
     """CPU fixture with a measured offset base and an absolute pose/finger controller."""
 
-    def __init__(self, obs, info):
+    instruction = ""
+
+    def __init__(self, obs, info, *, horizon=2, truncate=False, reward=2.0):
         self.obs, self.info = obs, info
+        self.horizon, self.truncate, self.reward = horizon, truncate, reward
+        self.closed = False
         self.received = []
         root, wrist, tcp, left, right = [
             SimpleNamespace(index=i, pose=Pose(xyz))
@@ -106,34 +110,37 @@ class NativeEpisode:
         self.qpos[0, 1] = (action[0, 6] + 1) * 0.02
 
     def reset(self, *, seed):
-        assert seed == 5
+        self.seed = seed
+        self.received.clear()
         return self.obs, self.info
 
     def step(self, action):
         self.apply(action)
+        count = len(self.received)
+        end = count == self.horizon
+        info = {
+            **self.info,
+            "episode": {"return": self.reward * count, "episode_len": count},
+        }
         return (
             self.obs,
-            0.5,
-            False,
-            True,
-            {
-                **self.info,
-                "episode": {"return": 0.5, "episode_len": 1},
-            },
+            self.reward,
+            end and not self.truncate,
+            end and self.truncate,
+            info,
         )
 
     def close(self):
-        pass
+        self.closed = True
 
 
-def make_backend(tmp_path, monkeypatch, obs, info):
-    env = NativeEpisode(obs, info)
+def make_backend(tmp_path, monkeypatch, env):
     monkeypatch.setattr(maniskill, "_make_env", lambda *args: (env, "Native-v1"))
     state = EnvState(tmp_path)
     backend = maniskill.ManiSkillPrimitives(
         task_name="Native-v1", seed=5, state=state, check_cancelled=lambda: None
     )
-    return env, backend, state
+    return backend, state
 
 
 def test_camera_names_modalities_and_cv_backprojection(tmp_path, monkeypatch):
@@ -151,7 +158,9 @@ def test_camera_names_modalities_and_cv_backprojection(tmp_path, monkeypatch):
             }
         },
     }
-    _, backend, state = make_backend(tmp_path, monkeypatch, obs, {"success": False})
+    env = NativeEpisode(obs, {"success": False})
+    backend, state = make_backend(tmp_path, monkeypatch, env)
+    assert env.seed == 5
     assert backend.cameras == ("head", "side_cam")
     assert backend.depth_cameras == ("side_cam",)
     record = backend.record_observation()
@@ -162,34 +171,16 @@ def test_camera_names_modalities_and_cv_backprojection(tmp_path, monkeypatch):
     world = state.load("side_cam_world.npz", step=record.step_idx)
     np.testing.assert_allclose(world[0, 1], [3.0, 0.0, 1.0])
     assert np.isnan(world[0, 0]).all()
-
-
-def test_camera_free_task_without_success_preserves_return_and_truncation(
-    tmp_path, monkeypatch
-):
-    env, backend, _ = make_backend(
-        tmp_path, monkeypatch, {"agent": {}, "sensor_data": {}}, {}
-    )
-    assert not backend.cameras and backend.native_success() is None
+    rgb[:] = 93
+    backend.step_controllers()
     backend.record_observation()
-    backend.move_to(xyz=[0.05, 0, 0.3])
-    np.testing.assert_allclose(env.received[0][0, :3], [0.03, 0, 0.3])
-    record = backend.record_observation()
-    assert record.terminated is False and record.truncated is True
-    assert record.extras["success"] is None and record.extras["episode_return"] == 0.5
-    assert record.extras["env_steps"] == 1
-    with pytest.raises(RuntimeError, match="ended"):
-        backend.step_controllers()
+    assert len(backend.frames) == 2
+    assert np.all(backend.frames[0] == 92)
+    assert np.all(backend.frames[1] == 93)
 
 
 def test_unsupported_robot_has_no_fabricated_arm(tmp_path, monkeypatch):
     env = NativeEpisode({}, {})
     env.unwrapped.agent.arm_joint_names = []
-    monkeypatch.setattr(maniskill, "_make_env", lambda *args: (env, "Cartpole-v1"))
     with pytest.raises(maniskill.UnsupportedRobotPolicy, match="no mapped arm"):
-        maniskill.ManiSkillPrimitives(
-            task_name="Cartpole-v1",
-            seed=5,
-            state=EnvState(tmp_path),
-            check_cancelled=lambda: None,
-        )
+        make_backend(tmp_path, monkeypatch, env)

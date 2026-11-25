@@ -228,3 +228,19 @@ class MobileBatch(ActionBatch):
     ) -> ToolResult:
         """Execute 1..K ordered move_base, move_lift, move_to or set_gripper items. Each item controls one component. An arm target uses the selected coordinate convention at the start of its item. In general coordinates the mount follows the base and lift; supply the target for the frame after each preceding item. Partial, error, success or truncation stops the remaining list. Use view_env for RGB."""
         return self._execute_actions(actions)
+
+
+class JointDrive(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    action: Literal["drive_joints"]
+    values: list[Annotated[float, Field(ge=-1, le=1)]]
+    steps: Annotated[int, Field(ge=1, le=32)] = 1
+
+
+class JointBatch(ActionBatch):
+    @tool
+    def execute_actions(
+        self, actions: Annotated[list[JointDrive], Field(min_length=1)]
+    ) -> ToolResult:
+        """Execute 1..K ordered drive_joints commands. For each control step, values in action_order scale the native joint deltas between -1 and 1; zero requests zero delta. steps repeats the command until the count or native termination. Read measured joint_position and joint_velocity in state_order after each command."""
+        return self._execute_actions(actions)

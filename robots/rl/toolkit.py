@@ -68,6 +68,7 @@ def episode_tools(
     from robots.rl.actions import (
         ActionBatch,
         DualArmBatch,
+        JointBatch,
         MobileBatch,
         ToolTipBatch,
     )
@@ -85,7 +86,9 @@ def episode_tools(
         if depth:
             views.append((owner.back_project, depth))
         batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
-        if capabilities.get("mobile"):
+        if capabilities.get("joint_control"):
+            batch_type = JointBatch
+        elif capabilities.get("mobile"):
             batch_type = MobileBatch
         elif not capabilities["gripper"]:
             batch_type = ToolTipBatch
@@ -109,6 +112,11 @@ def episode_tools(
             minimum=0,
             maximum=0,
             description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
+        )
+    if environment == "maniskill" and capabilities.get("joint_control"):
+        count = len(capabilities["joint_control"]["action_order"])
+        schema["$defs"]["JointDrive"]["properties"]["values"].update(
+            minItems=count, maxItems=count
         )
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
@@ -175,6 +183,8 @@ class RLToolkit(Toolkit):
                     "mobile": bool(getattr(native, "mobile", False)),
                     "gripper": native.has_gripper,
                 }
+                if getattr(native, "joint_drive", None) is not None:
+                    self.tool_capabilities["joint_control"] = native.joint_drive.layout
             else:
                 if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
                     native.display_size = image_size
@@ -307,13 +317,7 @@ class RLToolkit(Toolkit):
         except (ValueError, TypeError) as exc:
             from robots.rl.contracts import argument_hint
 
-            hint = argument_hint(name, self.environment)
-            if (
-                self.environment == "maniskill"
-                and name == "execute_actions"
-                and not self.tool_capabilities["gripper"]
-            ):
-                hint = "This robot accepts move_to with xyz, orientation_rpy, or both."
+            hint = argument_hint(name, self.environment, declaration)
             return ToolResult(
                 data={"error": str(exc)},
                 model_text=f"Invalid {name} arguments: {exc}. {hint} No tool executed; correct the arguments and try again.",
@@ -409,16 +413,9 @@ class RLToolkit(Toolkit):
 
     def native_outcome(self) -> dict[str, Any]:
         """Return the current native ManiSkill episode metrics, including partial runs."""
-        if self.environment != "maniskill":
-            return {}
-        native = self._primitives
-        return {
-            "success": native.native_success(),
-            "fail": native.native_fail(),
-            "episode_return": native.episode_return,
-            "terminated": native.terminated,
-            "truncated": native.truncated,
-        }
+        return (
+            self._primitives.native_outcome() if self.environment == "maniskill" else {}
+        )
 
     @property
     def infrastructure_error(self) -> dict | None:

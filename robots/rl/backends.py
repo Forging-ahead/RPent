@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import itertools
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -25,7 +24,8 @@ from pydantic import Field
 from scipy.spatial.transform import Rotation
 
 from robots.rl import geometry
-from robots.rl.tools import ControlConfig, LiberoRLPrimitives, Measurement, _clip_norm
+from robots.rl.perception import RecordedPerception
+from robots.rl.tools import ControlConfig, LiberoRLPrimitives, Measurement
 from rpent.tools import ToolResult, tool
 from rpent.utils.transforms import quaternion_wxyz, rotation_from_wxyz
 
@@ -48,15 +48,13 @@ class ScenePrimitives(LiberoRLPrimitives):
         check_cancelled,
         max_episode_steps: int = 10000,
     ) -> None:
-        self.env, self._sam3, self._state = env, sam3_client, state
+        self.env = env
+        self._init_perception(state, sam3_client)
         self._check_cancelled = check_cancelled
         self._config = ControlConfig()
         self._max_episode_steps = max_episode_steps
         self.env_steps = 0
         self.frames = []
-        self._masks = {}
-        self._mask_ids = itertools.count(1)
-        self._sam_calls = itertools.count(1)
         self._success = False
 
     @property
@@ -73,29 +71,26 @@ class ScenePrimitives(LiberoRLPrimitives):
     def robot_state(self) -> dict[str, Any]:
         raise NotImplementedError
 
-    def record_observation(self, *, command=None, result=None, elapsed_s=None):
-        state = self.robot_state()
-        with self._state.record_step(
-            state=state,
-            terminated=self.native_success(),
-            truncated=self.env_steps >= self._max_episode_steps,
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            extras={"env_steps": self.env_steps},
-        ) as step:
-            if hasattr(self, "coordinates"):
-                self._save("step_coordinates.json", self.coordinates.metadata(), step)
-            for camera in self.cameras:
-                rgb, world, calibration = self.capture(camera)
-                self._save(f"{camera}_raw.png", rgb, step)
-                rgb = self.annotate(rgb, calibration, state)
-                self._save(f"{camera}.png", rgb, step)
-                self._save(f"{camera}_world.npz", world.astype(np.float32), step)
-                self._save(f"{camera}_calibration.json", calibration, step)
-                if camera == self.cameras[0]:
-                    self.frames.append(rgb)
-        return self._state.get(step)
+    record_observation = RecordedPerception.record_observation
+
+    def _record_status(self):
+        return (
+            self.native_success(),
+            self.env_steps >= self._max_episode_steps,
+            {
+                "env_steps": self.env_steps,
+            },
+        )
+
+    def _record_camera(self, camera, step, state):
+        rgb, world, calibration = self.capture(camera)
+        self._save(f"{camera}_raw.png", rgb, step)
+        rgb = self.annotate(rgb, calibration, state)
+        self._save(f"{camera}.png", rgb, step)
+        self._save(f"{camera}_world.npz", world.astype(np.float32), step)
+        self._save(f"{camera}_calibration.json", calibration, step)
+        if camera == self.cameras[0]:
+            self.frames.append(rgb)
 
     def annotate(
         self, image: np.ndarray, calibration: dict, state: dict | None = None
@@ -207,12 +202,10 @@ class RoboCasaPrimitives(ScenePrimitives):
         self.env_steps += 1
 
     def _pose_action(self, current, xyz, rotation):
-        position = xyz - current.xyz
-        angle = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
-        action = np.zeros(7)
-        action[:3] = _clip_norm(position, self._config.position_step_m)
-        action[3:6] = _clip_norm(angle, self._config.rotation_step_rad)
-        return action, float(np.linalg.norm(position)), float(np.linalg.norm(angle))
+        position, rotation_step, distance, angle = self._bounded_pose_step(
+            current, xyz, rotation
+        )
+        return np.r_[position, rotation_step, 0.0], distance, angle
 
     @tool
     def set_gripper(self, opening: Annotated[float, Field(ge=0, le=1)]) -> ToolResult:
@@ -619,29 +612,6 @@ class RoboCasaGeneralPrimitives(MeasuredMobileMotion, RoboCasaPrimitives):
             },
         )
 
-    def record_observation(self, *, command=None, result=None, elapsed_s=None):
-        state = self.robot_state()
-        with self._state.record_step(
-            state=state,
-            terminated=self.native_success(),
-            truncated=self.env_steps >= self._max_episode_steps,
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            extras={"env_steps": self.env_steps},
-        ) as step:
-            self._save("step_coordinates.json", self._coordinates_metadata(), step)
-            for camera in self.cameras:
-                rgb, world, calibration = self.capture(camera)
-                self._save(f"{camera}_raw.png", rgb, step)
-                rgb = self.annotate(rgb, calibration)
-                self._save(f"{camera}.png", rgb, step)
-                self._save(f"{camera}_world.npz", world.astype(np.float32), step)
-                self._save(f"{camera}_calibration.json", calibration, step)
-                if camera == self.cameras[0]:
-                    self.frames.append(rgb)
-        return self._state.get(step)
-
     @tool
     def set_gripper(
         self, opening: Annotated[float, Field(ge=0.0, le=1.0)]
@@ -740,18 +710,10 @@ class RoboTwinPrimitives(ScenePrimitives):
     def capture(self, camera):
         rgb, depth = self.env.render_camera(camera, depth=True)
         meta = self.env.get_camera_meta(camera)
-        extrinsic = np.asarray(meta["extrinsic_cv"], dtype=float)
-        if extrinsic.shape == (3, 4):
-            extrinsic = np.vstack((extrinsic, [0, 0, 0, 1]))
-        elif extrinsic.shape != (4, 4):
-            raise ValueError("camera extrinsic must be a 3x4 or 4x4 transform")
-        camera_to_world = np.linalg.inv(extrinsic)
-        calibration = {
-            "intrinsic_K": np.asarray(meta["intrinsic_K"]).tolist(),
-            "extrinsic_cam2world": camera_to_world.tolist(),
-            "height": depth.shape[0],
-            "width": depth.shape[1],
-        }
+        calibration = geometry.opencv_calibration(
+            meta["intrinsic_K"], meta["extrinsic_cv"]
+        )
+        calibration.update(height=depth.shape[0], width=depth.shape[1])
         depth = np.asarray(depth, dtype=float)
         world = geometry.world_from_depth(depth, calibration)
         world[~np.isfinite(depth) | (depth <= 0)] = np.nan

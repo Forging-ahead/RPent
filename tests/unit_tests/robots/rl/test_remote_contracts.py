@@ -113,7 +113,6 @@ def test_local_maniskill_config_preserves_task_seed_and_native_step_budget(
     assert kwargs == {
         "task_name": name,
         "seed": 19,
-        "max_episode_steps": 12,
         "render_device": args.cuda_device,
         "sam3_client": None,
     }
@@ -196,22 +195,15 @@ def connected(tmp_path, monkeypatch, request):
     )
     options = dict(getattr(request, "param", {}))
     if camera_mode := options.pop("maniskill_camera_mode", None):
-        from robots.rl import maniskill
-        from robots.rl.toolkit import RLToolkit
         from tests.unit_tests.robots.rl.test_maniskill_toolkit import (
-            ExampleManiSkillEnv,
+            example_env,
+            maniskill_toolkit,
         )
 
-        env = ExampleManiSkillEnv(camera_mode=camera_mode)
-        monkeypatch.setattr(maniskill, "_make_env", lambda *args: (env, "Example-v1"))
+        env = example_env(camera_mode)
         task = {"environment": "maniskill", "task_name": "Example-v1", "seed": 1}
-        toolkit = RLToolkit(
-            environment="maniskill",
-            runtime_kwargs={"task_name": "Example-v1", "seed": 1},
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "backend/memory"),
-            output_dir=tmp_path / "backend/run",
-            **options,
+        toolkit = maniskill_toolkit(
+            tmp_path / "backend/run", monkeypatch, env, seed=1, **options
         )
     else:
         if options.pop("calibrated", False):

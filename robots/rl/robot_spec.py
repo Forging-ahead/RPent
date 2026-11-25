@@ -490,7 +490,6 @@ def _init_runtime(
             "task_name": args.task_name,
             "seed": args.seed,
             "render_device": args.cuda_device,
-            "max_episode_steps": args.max_episode_steps,
             "sam3_client": client,
         }
 
@@ -612,7 +611,7 @@ def configure_planner(planner, config: RunConfig):
     from robots.rl.history import HistoryRetention
 
     planner.capabilities_factory = lambda toolkit, system, user, turns: [
-        WorkflowCapability(toolkit),
+        WorkflowCapability(toolkit, system),
         HistoryRetention(toolkit),
     ]
     return planner

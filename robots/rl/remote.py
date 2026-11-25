@@ -343,6 +343,8 @@ class RemoteToolkit(Toolkit):
                     if self.tool_capabilities["gripper"]
                     else "native_tool_tip"
                 )
+                if self.tool_capabilities.get("joint_control"):
+                    tcp = "native_joint_control"
                 if (
                     coords.get("contract_version") != "episode_coordinates_v2"
                     or coords.get("tcp") != tcp

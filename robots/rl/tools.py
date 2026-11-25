@@ -84,6 +84,19 @@ class Measurement:
 class CartesianServo:
     """Shared measured move and gripper loops over a simulator's control inputs."""
 
+    def _bounded_pose_step(
+        self, current: Measurement, xyz: np.ndarray, rotation: np.ndarray
+    ):
+        """World-frame translation and rotation increments, plus unclipped errors."""
+        position = xyz - current.xyz
+        angle = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
+        return (
+            _clip_norm(position, self._config.position_step_m),
+            _clip_norm(angle, self._config.rotation_step_rad),
+            float(np.linalg.norm(position)),
+            float(np.linalg.norm(angle)),
+        )
+
     def _tcp_world(self, current: Measurement) -> np.ndarray:
         """Return the measured world position of the controlled TCP."""
         return current.xyz
@@ -266,8 +279,7 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
         capture_geometry: bool = True,
     ) -> None:
         self.env = env
-        self._sam3 = sam3_client
-        self._state = state
+        self._init_perception(state, sam3_client)
         self._check_cancelled = check_cancelled
         self._config = config
         from robots.rl.coordinates import Coordinates, grasp_axes
@@ -283,9 +295,6 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
         self._open_gap = self._finger_gap()
         self.env_steps = 0
         self.frames = [np.asarray(env.last_obs["main_images"])]
-        self._masks: dict[str, tuple[int, str, np.ndarray]] = {}
-        self._mask_ids = itertools.count(1)
-        self._sam_calls = itertools.count(1)
 
     @property
     def ended(self) -> bool:
@@ -314,17 +323,13 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
         self, current: Measurement, xyz: np.ndarray, rotation: np.ndarray
     ) -> tuple[np.ndarray, float, float]:
         """Return one bounded servo action and the remaining pose errors."""
-        position_error = xyz - current.xyz
-        rotation_error = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
+        position, rotation_step, distance, angle = self._bounded_pose_step(
+            current, xyz, rotation
+        )
         action = np.zeros(7)
         control = self.env.last_obs["control_state"]
         frame = np.asarray(control["control_to_world_rotation"], dtype=np.float64)
-        delta = np.concatenate(
-            [
-                frame.T @ _clip_norm(position_error, self._config.position_step_m),
-                frame.T @ _clip_norm(rotation_error, self._config.rotation_step_rad),
-            ]
-        )
+        delta = np.concatenate([frame.T @ position, frame.T @ rotation_step])
         low, high = np.asarray(control["output_min"]), np.asarray(control["output_max"])
         input_low, input_high = (
             np.asarray(control["input_min"]),
@@ -339,11 +344,7 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
             action[:6] > input_high + 1e-8
         ):
             raise ValueError("servo step exceeds the native controller bounds")
-        return (
-            action,
-            float(np.linalg.norm(position_error)),
-            float(np.linalg.norm(rotation_error)),
-        )
+        return action, distance, angle
 
     def _ended_reason(self) -> str:
         return "terminated" if self.env.terminated else "truncated"
@@ -408,10 +409,6 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
                 self._save(f"{camera}.png", np.asarray(rgb)[::-1], step)
                 self._save(f"{camera}_world.npz", world.astype(np.float32), step)
         return self._state.get(step)
-
-    def _save(self, name: str, value: Any, step: int) -> None:
-        if self._state.save(name, value, step=step) is None:
-            raise RuntimeError(f"failed to save observation artifact {name}")
 
 
 def _clip_norm(vector: np.ndarray, limit: float) -> np.ndarray:

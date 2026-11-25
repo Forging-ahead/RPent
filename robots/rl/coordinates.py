@@ -11,6 +11,23 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+def horizontal_rotation(forward: np.ndarray) -> np.ndarray:
+    """Return forward, left and up axes from a measured heading in world space."""
+    x, y = forward[:2]
+    length = np.linalg.norm([x, y, 0.0])
+    if length < 1e-6:
+        raise ValueError("robot base forward axis must have a horizontal projection")
+    x, y = x / length, y / length
+    return np.array([[x, -y, 0], [y, x, 0], [0, 0, 1]])
+
+
+def dual_arm_mount(
+    left: np.ndarray, right: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Measure the common arm origin and heading from both mounting centres."""
+    return (left + right) / 2, horizontal_rotation(np.cross(left - right, [0, 0, 1]))
+
+
 def grasp_axes(closing: np.ndarray, approach: np.ndarray) -> np.ndarray:
     """Build canonical tool axes from measured jaw and wrist-to-finger directions.
 
@@ -70,18 +87,9 @@ class Coordinates:
             or not np.isclose(np.linalg.det(base_rotation), 1, atol=1e-6)
         ):
             raise ValueError("general calibration needs a proper base rotation")
-        forward = base_rotation[:, 0].copy()
-        forward[2] = 0
-        if np.linalg.norm(forward) < 1e-6:
-            raise ValueError(
-                "robot base forward axis must have a horizontal projection"
-            )
-        forward /= np.linalg.norm(forward)
-        up = np.array([0.0, 0.0, 1.0])
-        rotation = np.column_stack((forward, np.cross(up, forward), up))
         return cls(
             origin.copy(),
-            rotation,
+            horizontal_rotation(base_rotation[:, 0]),
             **{f"{kind}_height_m": float(surface[2] - origin[2])},
             tcp=str(calibration.get("tcp", "native_grasp_tcp")),
         )
@@ -143,7 +151,9 @@ class Coordinates:
             "contract_version": metadata["contract_version"],
             "frame_version": self.version,
             "orientation": (
-                "fixed-axis XYZ RPY radians; +z follows the pen toward its tip"
+                "fixed-axis XYZ RPY radians relative to the initial base heading"
+                if self.tcp == "native_joint_control"
+                else "fixed-axis XYZ RPY radians; +z follows the pen toward its tip"
                 if self.tcp == "native_tool_tip"
                 else "fixed-axis XYZ RPY radians; tool +x closes the jaws, +z approaches"
             ),
@@ -185,15 +195,9 @@ def mounting_calibration(
     )
     if any(v.shape != (3,) or not np.isfinite(v).all() for v in (left, right, surface)):
         raise ValueError("Mount and support positions must be finite xyz vectors")
-    lateral = left - right
-    lateral[2] = 0
-    if np.linalg.norm(lateral) < 1e-6:
-        raise ValueError("Two distinguishable arm mounting centres are required")
-    lateral /= np.linalg.norm(lateral)
-    up = np.array([0.0, 0.0, 1.0])
-    rotation = np.column_stack((np.cross(lateral, up), lateral, up))
+    origin, rotation = dual_arm_mount(left, right)
     return {
-        "base_xyz": ((left + right) / 2).tolist(),
+        "base_xyz": origin.tolist(),
         "base_rotation": rotation.tolist(),
         f"{support_surface}_top_xyz": surface.tolist(),
         "left_mount_xyz": left.tolist(),

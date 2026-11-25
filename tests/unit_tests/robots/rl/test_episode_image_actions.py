@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -318,9 +321,6 @@ def test_sam_audit_preserves_exact_mask_score_threshold_and_service_error(tmp_pa
 def test_empty_qwen_tool_has_bounded_native_grammar_and_same_contract(
     tmp_path, model_name, enabled
 ):
-    import asyncio
-    from types import SimpleNamespace
-
     from pydantic_ai.models import ModelRequestParameters
     from pydantic_ai.tools import ToolDefinition
 
@@ -384,3 +384,114 @@ def test_general_fractional_grammar_keeps_zero_expressible_and_declared_limits()
     assert generated["properties"]["yaw_rate"] == {"type": "number"}
     assert generated["properties"]["vx"] == original["properties"]["vx"]
     assert generated["required"] == original["required"]
+
+
+def maniskill_workflow(width, *, rgb=False, depth=False, segment=False, prompt=None):
+    from robots.rl.toolkit import episode_tools
+    from robots.rl.workflow import WorkflowCapability
+
+    caps = {
+        "rgb_cameras": ["main"] if rgb else [],
+        "depth_cameras": ["main"] if depth else [],
+        "segment": segment,
+        "dual_arm": False,
+        "gripper": width is None,
+    }
+    if width:
+        caps["joint_control"] = {"action_order": [f"j{i}" for i in range(width)]}
+    toolkit = SimpleNamespace(
+        environment="maniskill",
+        tool_capabilities=caps if prompt else None,
+        max_actions_per_call=2,
+        reasoning=False,
+        workflow_stats={},
+    )
+    toolkit.list_tools = lambda: episode_tools(
+        toolkit, "maniskill", 2, capabilities=caps
+    )
+    return WorkflowCapability(toolkit, prompt)
+
+
+def assert_joint_template(text, workflow, width):
+    template, _ = json.JSONDecoder().raw_decode(
+        text.split("template to command movement: ")[1]
+    )
+    assert template["actions"][0]["values"] == [0] * width
+    workflow.allowed["execute_actions"].validate_arguments(template)
+
+
+@pytest.mark.parametrize("width", [None, 1, 12])
+def test_model_retry_uses_declared_robot_action_contract(width):
+    import time
+
+    from pydantic_ai import ModelRetry, ToolCallPart
+
+    workflow = maniskill_workflow(width)
+    workflow.request_started = time.perf_counter()
+    request = SimpleNamespace(model=SimpleNamespace())
+    response = SimpleNamespace(
+        state="complete",
+        finish_reason="tool_call",
+        parts=[ToolCallPart("execute_actions", {"actions": [{"action": "invalid"}]})],
+    )
+    with pytest.raises(ModelRetry) as retry:
+        asyncio.run(
+            workflow.after_model_request(
+                None, request_context=request, response=response
+            )
+        )
+    message = str(retry.value)
+    assert "No tool executed." in message
+    assert workflow.stats["invalid_tool_responses"] == 1
+    if width:
+        assert f"exactly {width} values" in message and "move_to" not in message
+        assert_joint_template(message, workflow, width)
+    else:
+        assert "move_to" in message and "set_gripper" in message
+        assert "drive_joints" not in message
+
+
+@pytest.mark.parametrize(
+    "rgb,depth,segment",
+    [(False, False, False), (True, False, False), (True, True, True)],
+)
+def test_joint_model_request_names_only_declared_sensors(rgb, depth, segment):
+    from pydantic_ai.messages import ModelRequest, SystemPromptPart
+    from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.tools import ToolDefinition
+
+    from robots.rl.prompt_bundle import system_prompt
+
+    generic = system_prompt({"environment": "maniskill"})
+    cap = maniskill_workflow(3, rgb=rgb, depth=depth, segment=segment, prompt=generic)
+    req = SimpleNamespace(
+        model=SimpleNamespace(model_name="qwen3.5-4b"),
+        model_request_parameters=ModelRequestParameters(
+            function_tools=[
+                ToolDefinition(name=tool.name, parameters_json_schema=tool.input_schema)
+                for tool in cap.toolkit.list_tools()
+            ]
+        ),
+        model_settings={},
+        messages=[
+            ModelRequest(
+                parts=[
+                    SystemPromptPart("other instructions"),
+                    SystemPromptPart(generic),
+                ]
+            )
+        ],
+    )
+    asyncio.run(cap.before_model_request(None, req))
+    if not rgb:
+        tag = req.model_settings["extra_body"]["response_format"]["format"]
+        assert not tag["at_least_one"] and tag["stop_after_first"]
+        schema = tag["tags"][0]["content"]["json_schema"]
+        values = schema["$defs"]["JointDrive"]["properties"]["values"]
+        assert values["minItems"] == values["maxItems"] == 3
+    assert req.messages[0].parts[0].content == "other instructions"
+    prompt = req.messages[0].parts[1].content
+    assert ("view_env" in prompt) == rgb and ("back_project" in prompt) == depth
+    assert ("segment" in prompt) == segment
+    assert all(word not in prompt for word in ("move_to", "set_gripper", "wrist"))
+    assert_joint_template(prompt, cap, 3)
