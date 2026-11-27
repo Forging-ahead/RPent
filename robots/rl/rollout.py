@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import time
 from pathlib import Path
@@ -50,8 +51,9 @@ async def run_episode(
     top_k: int = 20,
     thinking: bool = True,
     compaction: CompactionConfig | None = None,
-    image_size: int = 1024,
+    image_size: int | None = None,
     max_actions_per_call: int = 3,
+    include_jaw_mm: bool = False,
     record_artifacts: bool = False,
     output_dir: Path | None = None,
     request_timeout_s: float = 600.0,
@@ -62,6 +64,7 @@ async def run_episode(
         base_seed = task.get("seed", task.get("init_state_id"))
         seeds = [base_seed, *(task.get("fallback_seeds") or ())]
         opened = None
+        initial_images: list[bytes] = []
         last_exc: Exception | None = None
         for seed in seeds:
             attempt_task = dict(task)
@@ -77,12 +80,23 @@ async def run_episode(
                         "image_size": image_size,
                         "max_actions_per_call": max_actions_per_call,
                         "reasoning": thinking,
+                        "include_jaw_mm": include_jaw_mm,
                         "record_artifacts": record_artifacts,
                         "output_dir": str(output_dir) if output_dir else None,
                     },
+                    headers={"Accept": BINARY_EXECUTE_MEDIA_TYPE},
                 )
                 open_resp.raise_for_status()
-                opened = open_resp.json()
+                if BINARY_EXECUTE_MEDIA_TYPE in open_resp.headers.get(
+                    "content-type", ""
+                ):
+                    opened, initial_images = unpack_execute_response(open_resp.content)
+                else:
+                    opened = open_resp.json()
+                    initial_images = [
+                        base64.b64decode(b64)
+                        for b64 in opened.get("images_b64") or ()
+                    ]
                 break
             except (httpx.HTTPError, OSError) as exc:
                 last_exc = exc
@@ -98,6 +112,8 @@ async def run_episode(
             tools=opened["tools"],
             environment=opened["environment"],
             compaction=compaction,
+            initial_images=initial_images,
+            initial_image_cameras=opened.get("image_cameras") or (),
         )
         done = bool(opened["done"])
         success = bool(opened["success"])
@@ -230,6 +246,30 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Override per-environment default VLM display size (default: env-specific)",
+    )
+    parser.add_argument(
+        "--include-jaw-mm",
+        action="store_true",
+        help="Expose measured physical gripper jaw_mm (mm) in robot state feedback",
+    )
+    parser.add_argument(
+        "--context-management",
+        choices=("base", "dynamic"),
+        default="base",
+        help="History compaction strategy: base sliding window or dynamic batch pruning",
+    )
+    parser.add_argument(
+        "--compaction-max-tokens",
+        type=int,
+        default=None,
+        help="Optional explicit token trigger for history compaction",
+    )
+    parser.add_argument("--request-timeout-s", type=float, default=600.0)
     parser.add_argument("--record-artifacts", action="store_true")
     args = parser.parse_args()
 
@@ -240,7 +280,17 @@ def main() -> None:
     ]
     if args.limit is not None:
         rows = rows[: args.limit]
-    compaction = CompactionConfig()
+    compaction_max_tokens = args.compaction_max_tokens
+    compaction_max_messages: int | None = 80
+    if args.context_management == "dynamic":
+        compaction_max_messages = None
+        if compaction_max_tokens is None:
+            compaction_max_tokens = 48000
+    compaction = CompactionConfig(
+        strategy=args.context_management,
+        max_messages=compaction_max_messages,
+        max_tokens=compaction_max_tokens,
+    )
     sem = asyncio.Semaphore(args.concurrency)
 
     async def _run_all() -> list[dict[str, Any]]:
@@ -260,8 +310,11 @@ def main() -> None:
                     top_p=args.top_p,
                     top_k=args.top_k,
                     compaction=compaction,
+                    image_size=args.image_size,
+                    include_jaw_mm=args.include_jaw_mm,
                     record_artifacts=args.record_artifacts,
                     output_dir=args.output_dir / f"ep_{idx:04d}",
+                    request_timeout_s=args.request_timeout_s,
                 )
 
         return await asyncio.gather(*(_one(i, r) for i, r in enumerate(rows)))

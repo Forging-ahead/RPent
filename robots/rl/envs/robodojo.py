@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 import numpy as np
 from pydantic import Field
 from scipy.spatial.transform import Rotation
 
-from robots.rl.geometry import Coordinates, pose_matrix
+from robots.rl.geometry import Coordinates, pose_matrix, rpy_of
 from robots.rl.perception import RecordedPerception
 from robots.robodojo.access import CAMERAS
 from robots.robodojo.primitives import RoboDojoPrimitives as NativePrimitives
@@ -131,6 +132,25 @@ class RoboDojoRLPrimitives(RecordedPerception):
             or self.env_steps >= self._max_episode_steps
         )
 
+    def jaw_mm(self) -> dict[str, float]:
+        cached = getattr(self, "_last_jaw_mm", None)
+        if cached is not None:
+            return dict(cached)
+        motion = self._native_call(self.env.get_motion_state)
+        return self._extract_jaw_mm(motion)
+
+    def _extract_jaw_mm(self, motion: Mapping[str, Any]) -> dict[str, float]:
+        jaw_map: dict[str, float] = {}
+        tools_cal = self.calibration.get("tools", {})
+        for arm in ("left", "right"):
+            if f"{arm}_jaw_mm" in motion:
+                jaw_map[arm] = round(float(motion[f"{arm}_jaw_mm"]), 1)
+            else:
+                max_jaw_mm = float(tools_cal.get(arm, {}).get("max_jaw_mm", 88.0))
+                opening = float(np.clip(motion[f"{arm}_gripper"], 0.0, 1.0))
+                jaw_map[arm] = round(opening * max_jaw_mm, 1)
+        return jaw_map
+
     def robot_state(self) -> dict[str, Any]:
         if self.infrastructure_error is not None:
             return {**(self._last_robot_state or {}), "state_stale": True}
@@ -142,13 +162,12 @@ class RoboDojoRLPrimitives(RecordedPerception):
             xyz, rotation = self._pose(arm, motion)
             result[arm] = {
                 "pose": {
-                    "xyz": xyz.tolist(),
-                    "orientation_rpy": Rotation.from_matrix(rotation)
-                    .as_euler("xyz")
-                    .tolist(),
+                    "xyz": [round(float(v), 4) for v in xyz],
+                    "orientation_rpy": rpy_of(rotation),
                 },
-                "opening": motion[f"{arm}_gripper"],
+                "opening": round(float(motion[f"{arm}_gripper"]), 3),
             }
+        self._last_jaw_mm = self._extract_jaw_mm(motion)
         self._last_robot_state = result
         return result
 
@@ -226,8 +245,9 @@ class RoboDojoRLPrimitives(RecordedPerception):
         distance = float(np.linalg.norm(measured_xyz - target))
         angle = float(Rotation.from_matrix(rotation @ measured_rotation.T).magnitude())
         result.data.update(
-            position_error_m=distance,
-            orientation_error_rad=angle,
+            arm=arm,
+            position_error_m=round(distance, 4),
+            rotation_error_rad=round(angle, 3),
             status="error"
             if result.data.get("error")
             else "reached"
@@ -246,9 +266,13 @@ class RoboDojoRLPrimitives(RecordedPerception):
         result = self._native_call(self.native.set_gripper, arm=arm, val=opening)
         if not self._check_execution(result):
             return result
-        measured = self._native_call(self.env.get_motion_state)[f"{arm}_gripper"]
+        measured = float(
+            self._native_call(self.env.get_motion_state)[f"{arm}_gripper"]
+        )
         result.data.update(
-            opening=measured,
+            arm=arm,
+            opening=round(measured, 3),
+            opening_error=round(float(opening - measured), 3),
             status="error"
             if result.data.get("error")
             else "reached"

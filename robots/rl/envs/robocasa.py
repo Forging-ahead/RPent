@@ -118,13 +118,15 @@ class RoboCasaRLPrimitives(RecordedPerception):
             ).tolist()
         return metadata
 
+    def jaw_mm(self) -> float:
+        return round(max(0.0, self._finger_gap()) * 1000.0, 1)
+
     def robot_state(self) -> dict[str, Any]:
         measured = self._refresh_coordinates()
         return {
             **measured.state(),
             "finger_gap_m": round(self._finger_gap(), 5),
             "lift_m": round(float(self._control["lift_m"]), 4),
-            "coordinates": self.coordinates.description(),
             "env_steps": self.env_steps,
         }
 

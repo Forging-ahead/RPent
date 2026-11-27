@@ -231,7 +231,7 @@ def rpy_of(rotation: np.ndarray) -> list[float]:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Gimbal lock detected")
         angles = Rotation.from_matrix(rotation).as_euler("xyz")
-    return [round(float(value), 6) for value in angles]
+    return [round(float(value), 3) for value in angles]
 
 
 def metric_depth(depth: np.ndarray, camera_meta: dict[str, Any]) -> np.ndarray:

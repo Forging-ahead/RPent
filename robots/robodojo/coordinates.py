@@ -123,6 +123,8 @@ def calibrate(env):
         urdf = ET.parse(Path(robot.urdf_path)).getroot()
         joints = {joint.attrib["name"]: joint for joint in urdf.findall("joint")}
         finger_points = []
+        finger_links = []
+        finger_poses = []
         for name in robot.gripper_joints_name:
             joint = joints[name]
             if joint.attrib["type"] != "prismatic":
@@ -136,19 +138,37 @@ def calibrate(env):
             vertices = _vertices_in_link(stage, root, link)
             world = vertices @ pose[:3, :3].T + pose[:3, 3]
             finger_points.append((world - native[:3, 3]) @ native[:3, :3])
+            finger_links.append(link)
+            finger_poses.append(pose)
         if len(finger_points) != 2:
             raise ValueError("Grasp calibration requires two measured finger links")
         # X5 and Aloha both slide along native Y. The opposing inner faces are
         # measured from meshes; no fixed wrist-to-grasp distance is assumed.
         centres = finger_contact_centres(*finger_points)
         offset = centres.mean(axis=0)
+        pad_offsets_in_finger = []
+        for centre, pose in zip(centres, finger_poses, strict=True):
+            world_pad = native[:3, :3] @ centre + native[:3, 3]
+            pad_offsets_in_finger.append(
+                (pose[:3, :3].T @ (world_pad - pose[:3, 3])).tolist()
+            )
         tools[arm] = {
             "offset_in_native_m": offset.tolist(),
             "rotation_to_native": grasp_axes(centres[1] - centres[0], offset).tolist(),
             "contact_centres_in_native_m": centres.tolist(),
+            "finger_links": finger_links,
+            "pad_offsets_in_finger_m": pad_offsets_in_finger,
+            "calibrated_jaw_m": float(np.linalg.norm(centres[1] - centres[0])),
             "native_link": robot.ee_link_name,
             "method": "loaded_collision_inner_faces",
         }
+    env._rpent_finger_pad_cal = {
+        arm: (
+            tools[arm]["finger_links"],
+            [np.asarray(v, dtype=np.float64) for v in tools[arm]["pad_offsets_in_finger_m"]],
+        )
+        for arm in ("left", "right")
+    }
     support, top = _support_surface(stage, env.scene_manager)
     frame = mounting_calibration(
         mounts["left"], mounts["right"], top, support_surface=support

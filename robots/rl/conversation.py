@@ -41,7 +41,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 from PIL import Image
@@ -87,19 +87,68 @@ class LogicalMessage:
     image_tokens: int = 0
 
 
+def _parse_opening_cameras(
+    initial_observation_text: str, count: int, explicit: Sequence[str] = ()
+) -> list[str]:
+    if len(explicit) == count:
+        return [str(c) for c in explicit]
+    try:
+        parsed = json.loads(initial_observation_text)
+        imgs = parsed.get("images")
+        if isinstance(imgs, list) and len(imgs) == count:
+            return [str(item.get("camera", f"cam_{i}")) for i, item in enumerate(imgs)]
+    except Exception:
+        pass
+    return [f"cam_{i}" for i in range(count)]
+
+
 def opening_message(
-    system_prompt: str, user_message: str, initial_observation_text: str
+    system_prompt: str,
+    user_message: str,
+    initial_observation_text: str,
+    initial_images: Sequence[bytes] = (),
+    initial_image_cameras: Sequence[str] = (),
 ) -> LogicalMessage:
-    """Build the opening [system, user] logical message."""
+    """Build the opening [system, user] logical message (with optional step=0 images)."""
+    opening_text = f"{user_message}\n\n{initial_observation_text}"
+    if not initial_images:
+        return LogicalMessage(
+            kind="opening",
+            wire=(
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": opening_text},
+            ),
+        )
+    raw_images = tuple(bytes(img) for img in initial_images)
+    fids = [file_id_for(img) for img in raw_images]
+    cameras = _parse_opening_cameras(
+        initial_observation_text, len(raw_images), initial_image_cameras
+    )
+    user_parts: list[dict[str, Any]] = [{"type": "text", "text": f"{opening_text}\n"}]
+    total_img_tokens = 0
+    for img, fid, cam in zip(raw_images, fids, cameras, strict=True):
+        total_img_tokens += count_image_tokens(img)
+        user_parts.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f'<observation step="0" camera="{cam}" file_id="{fid}">',
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"{IMAGE_PLACEHOLDER_PREFIX}{fid}"},
+                },
+                {"type": "text", "text": "</observation>"},
+            ]
+        )
     return LogicalMessage(
         kind="opening",
         wire=(
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"{user_message}\n\n{initial_observation_text}",
-            },
+            {"role": "user", "content": user_parts},
         ),
+        images=raw_images,
+        image_tokens=total_img_tokens,
     )
 
 
@@ -263,7 +312,7 @@ def validate_tool_calls(
 
 @dataclass(frozen=True)
 class CompactionConfig:
-    """Sliding-window compaction settings matching RequestAwareSlidingWindow."""
+    """History compaction settings supporting ``base`` sliding window and ``dynamic`` pruning."""
 
     max_messages: int | None = 80
     keep_messages: int = 10
@@ -271,11 +320,18 @@ class CompactionConfig:
     max_fraction: float | None = 0.7
     max_tokens: int | None = None
     preserve_first_user_message: bool = True
+    strategy: Literal["base", "dynamic"] = "base"
+    keep_recent_images: int = 4
+    keep_recent_thinking: int = 4
+    preserve_opening_images: bool = True
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> CompactionConfig | None:
         if data is None:
             return None
+        strategy = str(data.get("strategy", "base"))
+        if strategy not in {"base", "dynamic"}:
+            raise ValueError(f"Unsupported compaction strategy: {strategy!r}")
         return cls(
             max_messages=data.get("max_messages", 80),
             keep_messages=int(data.get("keep_messages", 10)),
@@ -285,6 +341,10 @@ class CompactionConfig:
             preserve_first_user_message=bool(
                 data.get("preserve_first_user_message", True)
             ),
+            strategy=strategy,  # type: ignore[arg-type]
+            keep_recent_images=int(data.get("keep_recent_images", 4)),
+            keep_recent_thinking=int(data.get("keep_recent_thinking", 4)),
+            preserve_opening_images=bool(data.get("preserve_opening_images", True)),
         )
 
     @property
@@ -294,6 +354,51 @@ class CompactionConfig:
         if self.max_fraction is not None and self.context_window is not None:
             return int(self.context_window * self.max_fraction)
         return None
+
+
+def _strip_message_images(msg: LogicalMessage) -> LogicalMessage:
+    """Return a new LogicalMessage replacing every image_url part with [image omitted]."""
+    if not msg.images:
+        return msg
+    new_wire: list[dict[str, Any]] = []
+    for item in msg.wire:
+        content = item.get("content")
+        if not isinstance(content, list):
+            new_wire.append(dict(item))
+            continue
+        new_parts: list[dict[str, Any]] = []
+        for part in content:
+            if part.get("type") == "image_url":
+                new_parts.append({"type": "text", "text": "[image omitted]"})
+            else:
+                new_parts.append(dict(part))
+        new_wire.append({**item, "content": new_parts})
+    return LogicalMessage(
+        kind=msg.kind,
+        wire=tuple(new_wire),
+        tool_call_ids=msg.tool_call_ids,
+        images=(),
+        image_tokens=0,
+    )
+
+
+def _strip_message_thinking(msg: LogicalMessage) -> LogicalMessage:
+    """Return a new LogicalMessage with assistant reasoning_content removed."""
+    if msg.kind != "assistant" or not any(
+        item.get("reasoning_content") is not None for item in msg.wire
+    ):
+        return msg
+    new_wire = tuple(
+        {k: v for k, v in item.items() if k != "reasoning_content"}
+        for item in msg.wire
+    )
+    return LogicalMessage(
+        kind=msg.kind,
+        wire=new_wire,
+        tool_call_ids=msg.tool_call_ids,
+        images=msg.images,
+        image_tokens=msg.image_tokens,
+    )
 
 
 def find_safe_cutoff(messages: Sequence[LogicalMessage], keep_messages: int) -> int:
@@ -359,6 +464,8 @@ class EpisodeConversation:
     environment: str
     compaction: CompactionConfig | None = None
     max_output_retries: int = 1
+    initial_images: Sequence[bytes] = ()
+    initial_image_cameras: Sequence[str] = ()
     messages: list[LogicalMessage] = field(default_factory=list)
     output_retries: int = 0
 
@@ -375,6 +482,8 @@ class EpisodeConversation:
                     self.system_prompt,
                     self.user_message,
                     self.initial_observation_text,
+                    initial_images=self.initial_images,
+                    initial_image_cameras=self.initial_image_cameras,
                 )
             ]
 
@@ -399,13 +508,91 @@ class EpisodeConversation:
             out.extend(cached)
         return out
 
+    def _compact_base(self, cfg: CompactionConfig) -> bool:
+        cutoff = find_safe_cutoff(self.messages, cfg.keep_messages)
+        if cutoff <= 0:
+            return False
+        trimmed = list(self.messages[cutoff:])
+        if cfg.preserve_first_user_message:
+            opening = self.messages[0]
+            if not trimmed or trimmed[0] is not opening:
+                trimmed = [opening, *trimmed]
+        if trimmed == self.messages:
+            return False
+        self.messages = trimmed
+        active_ids = {id(m) for m in trimmed}
+        self._openai_wire_cache = {
+            k: v for k, v in self._openai_wire_cache.items() if k in active_ids
+        }
+        return True
+
+    def _compact_dynamic(
+        self,
+        cfg: CompactionConfig,
+        *,
+        current_tokens: int | None,
+        count_text: Callable[[str], int] | None,
+        over_messages: bool,
+    ) -> bool:
+        est_before = estimate_logical_tokens(self.messages, self.tools, count_text)
+        start_img_idx = 1 if cfg.preserve_opening_images else 0
+        image_indices = [
+            i for i in range(start_img_idx, len(self.messages)) if self.messages[i].images
+        ]
+        keep_img = max(0, cfg.keep_recent_images)
+        drop_img_set = (
+            set(image_indices[:-keep_img]) if keep_img > 0 else set(image_indices)
+        )
+
+        think_indices = [
+            i
+            for i in range(1, len(self.messages))
+            if self.messages[i].kind == "assistant"
+            and any(w.get("reasoning_content") is not None for w in self.messages[i].wire)
+        ]
+        keep_think = max(0, cfg.keep_recent_thinking)
+        drop_think_set = (
+            set(think_indices[:-keep_think]) if keep_think > 0 else set(think_indices)
+        )
+
+        changed = False
+        updated: list[LogicalMessage] = []
+        for idx, msg in enumerate(self.messages):
+            new_msg = msg
+            if idx in drop_img_set:
+                new_msg = _strip_message_images(new_msg)
+            if idx in drop_think_set:
+                new_msg = _strip_message_thinking(new_msg)
+            if new_msg is not msg:
+                changed = True
+            updated.append(new_msg)
+
+        if changed:
+            self.messages = updated
+            active_ids = {id(m) for m in updated}
+            self._openai_wire_cache = {
+                k: v for k, v in self._openai_wire_cache.items() if k in active_ids
+            }
+
+        limit = cfg.token_trigger
+        est_after = estimate_logical_tokens(self.messages, self.tools, count_text)
+        saved = max(0, est_before - est_after)
+        effective_after = (
+            max(0, current_tokens - saved) if current_tokens is not None else est_after
+        )
+        still_over_tokens = limit is not None and effective_after > limit
+        if not changed or still_over_tokens or over_messages:
+            fell_back = self._compact_base(cfg)
+            return changed or fell_back
+        return True
+
     def maybe_compact(
         self,
         *,
         current_tokens: int | None = None,
         count_text: Callable[[str], int] | None = None,
     ) -> bool:
-        """Apply sliding-window compaction if message count or token budget is exceeded."""
+        """Apply base sliding-window or dynamic batch compaction when budget is exceeded."""
         cfg = self.compaction
         if cfg is None:
             return False
@@ -413,7 +600,7 @@ class EpisodeConversation:
             cfg.max_messages is not None and len(self.messages) > cfg.max_messages
         )
         limit = cfg.token_trigger
-        if not over_messages and limit is not None:
+        if limit is not None:
             tokens = (
                 current_tokens
                 if current_tokens is not None
@@ -425,20 +612,14 @@ class EpisodeConversation:
         if not (over_messages or over_tokens):
             return False
 
-        cutoff = find_safe_cutoff(self.messages, cfg.keep_messages)
-        if cutoff <= 0:
-            return False
-        trimmed = list(self.messages[cutoff:])
-        if cfg.preserve_first_user_message:
-            opening = self.messages[0]
-            if not trimmed or trimmed[0] is not opening:
-                trimmed = [opening, *trimmed]
-        self.messages = trimmed
-        active_ids = {id(m) for m in trimmed}
-        self._openai_wire_cache = {
-            k: v for k, v in self._openai_wire_cache.items() if k in active_ids
-        }
-        return True
+        if cfg.strategy == "dynamic":
+            return self._compact_dynamic(
+                cfg,
+                current_tokens=current_tokens,
+                count_text=count_text,
+                over_messages=over_messages,
+            )
+        return self._compact_base(cfg)
 
     def append_assistant(
         self,

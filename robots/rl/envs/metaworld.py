@@ -95,6 +95,8 @@ GRIPPER_SETTLE_OPENING = 0.01
 # Measured with an unloaded Sawyer gripper after 50 native steps at each end.
 CLOSED_GAP_M = 0.029667591142120822
 OPEN_GAP_M = 0.10034364850608656
+# Constant offset between site centres (leftEndEffector/rightEndEffector) and inner rubber pad faces.
+_SITE_TO_INNER_PAD_OFFSET_M = 0.01205
 
 
 def _digest(values):
@@ -197,6 +199,18 @@ class Scene:
         gap = float(np.linalg.norm(pads[0] - pads[1]))
         return float(np.clip((gap - CLOSED_GAP_M) / (OPEN_GAP_M - CLOSED_GAP_M), 0, 1))
 
+    def _inner_pad_clearance_m(self, fallback_site_gap_m: float) -> float:
+        try:
+            lg = self.model.geom("leftpad_geom").id
+            rg = self.model.geom("rightpad_geom").id
+            center_dist = float(
+                np.linalg.norm(self.data.geom_xpos[lg] - self.data.geom_xpos[rg])
+            )
+            half_thick = float(self.model.geom_size[lg][1] + self.model.geom_size[rg][1])
+            return max(0.0, center_dist - half_thick)
+        except Exception:
+            return max(0.0, fallback_site_gap_m - _SITE_TO_INNER_PAD_OFFSET_M)
+
     def state(self):
         pads = self.pads()
         gap = float(np.linalg.norm(pads[0] - pads[1]))
@@ -209,6 +223,7 @@ class Scene:
             "hand_rotation": self.data.body("hand").xmat.reshape(3, 3).copy().tolist(),
             "opening": round(opening, 3),
             "finger_gap_m": round(gap, 5),
+            "jaw_mm": round(self._inner_pad_clearance_m(gap) * 1000.0, 1),
             "env_steps": steps,
             "terminated": self.success,
             "truncated": steps >= self.max_episode_steps and not self.success,
@@ -407,6 +422,27 @@ class MetaWorldRLPrimitives(RecordedPerception):
     def _update_state(self, state):
         self.env_steps = int(state["env_steps"])
         self._success |= bool(state["terminated"])
+        if "jaw_mm" in state:
+            self._last_jaw_mm = round(float(state["jaw_mm"]), 1)
+        elif "finger_gap_m" in state:
+            self._last_jaw_mm = round(
+                max(0.0, float(state["finger_gap_m"]) - _SITE_TO_INNER_PAD_OFFSET_M)
+                * 1000.0,
+                1,
+            )
+
+    def jaw_mm(self) -> float:
+        cached = getattr(self, "_last_jaw_mm", None)
+        if cached is not None:
+            return cached
+        state = self.env.state()
+        if "jaw_mm" in state:
+            return round(float(state["jaw_mm"]), 1)
+        return round(
+            max(0.0, float(state["finger_gap_m"]) - _SITE_TO_INNER_PAD_OFFSET_M)
+            * 1000.0,
+            1,
+        )
 
     def robot_state(self):
         state = self.env.state()

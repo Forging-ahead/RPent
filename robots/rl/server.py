@@ -81,6 +81,17 @@ def pack_execute_response(meta: dict[str, Any], images: Sequence[bytes]) -> byte
     return b"".join(parts)
 
 
+def peek_execute_meta(payload: bytes) -> dict[str, Any]:
+    """Decode only the leading JSON metadata frame without copying PNG payloads."""
+    mv = memoryview(payload)
+    if len(mv) < 4:
+        raise ValueError("Truncated binary execute response")
+    (meta_len,) = struct.unpack_from("!I", mv, 0)
+    if len(mv) < 4 + meta_len:
+        raise ValueError("Truncated binary execute metadata")
+    return json.loads(bytes(mv[4 : 4 + meta_len]).decode("utf-8"))
+
+
 def unpack_execute_response(payload: bytes) -> tuple[dict[str, Any], list[bytes]]:
     """Unpack binary execute payload into ``(meta_dict, raw_png_images)``."""
     mv = memoryview(payload)
@@ -405,8 +416,10 @@ class _WorkerSessionHost:
         task = dict(req["task"])
         max_episode_steps = int(req.get("max_episode_steps", 10000))
         max_actions = int(req.get("max_actions_per_call", 3))
-        image_size = int(req.get("image_size", 1024))
+        raw_image_size = req.get("image_size")
+        image_size = None if raw_image_size is None else int(raw_image_size)
         reasoning = bool(req.get("reasoning", True))
+        include_jaw_mm = bool(req.get("include_jaw_mm", False))
         record_artifacts = bool(req.get("record_artifacts", False))
         output_dir = req.get("output_dir")
         from rpent.utils.logging import init_output_dir
@@ -433,10 +446,14 @@ class _WorkerSessionHost:
             image_size=image_size,
             max_actions_per_call=max_actions,
             reasoning=reasoning,
+            include_jaw_mm=include_jaw_mm,
         )
         self._toolkit = toolkit
         sys_prompt, usr_msg = render_prompts(
-            self.environment, reasoning=reasoning, max_actions_per_call=max_actions
+            self.environment,
+            reasoning=reasoning,
+            max_actions_per_call=max_actions,
+            include_jaw_mm=include_jaw_mm,
         )
         init_obs = toolkit.initial_observation()
         init_state_id = task.get("init_state_id")
@@ -452,6 +469,10 @@ class _WorkerSessionHost:
             "user_message": usr_msg,
             "tools": openai_tool_schemas(toolkit.list_tools()),
             "initial_observation": init_obs.to_text(),
+            "image_cameras": [
+                str(item["camera"]) for item in init_obs.data.get("images", [])
+            ],
+            "images": [bytes(img) for img in init_obs.images],
             "init_state_id": init_state_id,
             "done": toolkit.completion_result() is not None,
             "success": bool(toolkit.solved()),
@@ -1023,9 +1044,10 @@ class OpenRequest(BaseModel):
     task: dict[str, Any]
     cohort_id: str | None = None
     max_episode_steps: int = 10000
-    image_size: int = 1024
+    image_size: int | None = None
     max_actions_per_call: int = 3
     reasoning: bool = True
+    include_jaw_mm: bool = False
     record_artifacts: bool = False
     output_dir: str | None = None
 
@@ -1033,6 +1055,21 @@ class OpenRequest(BaseModel):
 class ExecuteRequest(BaseModel):
     name: str
     arguments: dict[str, Any] = {}
+
+
+def _wants_binary(accept: str) -> bool:
+    return BINARY_EXECUTE_MEDIA_TYPE in accept or "application/octet-stream" in accept
+
+
+def _encode_image_response(result: dict[str, Any], accept: str) -> Any:
+    images: list[bytes] = result.pop("images", [])
+    if _wants_binary(accept):
+        return Response(
+            content=pack_execute_response(result, images),
+            media_type=BINARY_EXECUTE_MEDIA_TYPE,
+        )
+    result["images_b64"] = [base64.b64encode(img).decode("ascii") for img in images]
+    return result
 
 
 def create_app(manager: SimPoolManager) -> FastAPI:
@@ -1053,13 +1090,14 @@ def create_app(manager: SimPoolManager) -> FastAPI:
     @app.post("/sessions/open")
     async def open_session(req: OpenRequest, request: Request):
         try:
-            return await manager.open_session(
+            result = await manager.open_session(
                 req.model_dump(), is_disconnected=request.is_disconnected
             )
         except asyncio.CancelledError:
             raise HTTPException(status_code=499, detail="Client disconnected")
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return _encode_image_response(result, request.headers.get("accept", ""))
 
     @app.post("/cohorts/{cohort_id}/close")
     async def close_cohort(cohort_id: str):
@@ -1073,16 +1111,7 @@ def create_app(manager: SimPoolManager) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-        images: list[bytes] = result.pop("images", [])
-        accept = request.headers.get("accept", "")
-        if BINARY_EXECUTE_MEDIA_TYPE in accept or "application/octet-stream" in accept:
-            return Response(
-                content=pack_execute_response(result, images),
-                media_type=BINARY_EXECUTE_MEDIA_TYPE,
-            )
-        result["images_b64"] = [base64.b64encode(img).decode("ascii") for img in images]
-        return result
+        return _encode_image_response(result, request.headers.get("accept", ""))
 
     @app.post("/sessions/{session_id}/close")
     async def close_session(session_id: str):
@@ -1196,13 +1225,17 @@ class SimPoolRouter:
         return min(self.backends, key=_key)
 
     async def open_session(
-        self, payload: dict[str, Any], *, is_disconnected=None
-    ) -> dict[str, Any]:
+        self, payload: dict[str, Any], *, is_disconnected=None, accept: str = ""
+    ) -> Any:
         assert self._client is not None
         backend = self._pick_backend()
         self._reserved[backend] += 1
         pending = asyncio.create_task(
-            self._client.post(f"{backend}/sessions/open", json=payload)
+            self._client.post(
+                f"{backend}/sessions/open",
+                json=payload,
+                headers={"Accept": BINARY_EXECUTE_MEDIA_TYPE},
+            )
         )
         try:
             try:
@@ -1228,13 +1261,39 @@ class SimPoolRouter:
                 ) from exc
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
-            data = resp.json()
-            sid = str(data["session_id"])
+            is_binary = BINARY_EXECUTE_MEDIA_TYPE in resp.headers.get(
+                "content-type", ""
+            )
+            meta = (
+                peek_execute_meta(resp.content) if is_binary else resp.json()
+            )
+            sid = str(meta["session_id"])
             if is_disconnected is not None and await is_disconnected():
                 await self._client.post(f"{backend}/sessions/{sid}/close", json={})
                 raise HTTPException(499, "Client disconnected during open")
             self._sessions[sid] = (backend, payload.get("cohort_id"))
-            return data
+            if is_binary:
+                if _wants_binary(accept):
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=BINARY_EXECUTE_MEDIA_TYPE,
+                    )
+                unpacked_meta, images = unpack_execute_response(resp.content)
+                unpacked_meta["images_b64"] = [
+                    base64.b64encode(img).decode("ascii") for img in images
+                ]
+                return unpacked_meta
+            if _wants_binary(accept):
+                images = [
+                    base64.b64decode(b64) for b64 in meta.pop("images_b64", [])
+                ]
+                return Response(
+                    content=pack_execute_response(meta, images),
+                    status_code=resp.status_code,
+                    media_type=BINARY_EXECUTE_MEDIA_TYPE,
+                )
+            return meta
         except BaseException:
             self._reserved[backend] = max(0, self._reserved[backend] - 1)
             raise
@@ -1376,7 +1435,9 @@ def create_router_app(router: SimPoolRouter) -> FastAPI:
     @app.post("/sessions/open")
     async def open_session(req: OpenRequest, request: Request):
         return await router.open_session(
-            req.model_dump(), is_disconnected=request.is_disconnected
+            req.model_dump(),
+            is_disconnected=request.is_disconnected,
+            accept=request.headers.get("accept", ""),
         )
 
     @app.post("/cohorts/{cohort_id}/close")

@@ -192,7 +192,8 @@ def test_settled_close_with_residual_opening_stops_batch():
     assert result["stop_reason"] == "blocked"
     closed = result["results"][0]
     assert closed["status"] == "partial"
-    assert closed["opening"] == 0.4
+    assert closed["opening_error"] == -0.4
+    assert result["final_state"]["opening"] == 0.4
     assert "grasp_status" not in closed
     assert env.step > 0
 
@@ -255,6 +256,8 @@ def test_pool_exposes_two_views_and_consistent_terminal_flags(
     assert opened["environment"] == "robolab"
     assert "wrist_cam" in opened["system_prompt"]
     assert "table_height_above_base_cm" in opened["system_prompt"]
+    assert len(opened["images"]) == 2
+    assert opened["image_cameras"] == ["over_shoulder_left_camera", "wrist_cam"]
     initial = json.loads(opened["initial_observation"])["state"]
     assert initial["max_episode_steps"] == min(configured_limit, 40)
     assert initial["native_max_episode_steps"] == 40
@@ -285,9 +288,9 @@ def test_pool_exposes_two_views_and_consistent_terminal_flags(
     reply = json.loads(result["text"])
     assert reply["executed_count"] == 1
     assert reply["stop_reason"] == ("terminated" if success else "truncated")
-    for state in (reply["results"][0], reply["final_state"]):
-        assert state["terminated"] is success
-        assert state["truncated"] is (not success)
+    assert "pose" not in reply["results"][0]
+    assert reply["final_state"]["terminated"] is success
+    assert reply["final_state"]["truncated"] is (not success)
     host.close()
     assert env.closed
 

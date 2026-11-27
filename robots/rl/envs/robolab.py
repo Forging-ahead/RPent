@@ -180,6 +180,10 @@ class RoboLabRLPrimitives(RecordedPerception):
         )
         return {"terminated": terminated, "truncated": truncated}
 
+    def jaw_mm(self) -> float:
+        pads = np.asarray(self._motion["pad_centres_world_m"], dtype=np.float64)
+        return round(float(np.linalg.norm(pads[0] - pads[1])) * 1000.0, 1)
+
     def robot_state(self) -> dict[str, Any]:
         pads = np.asarray(self._motion["pad_centres_world_m"])
         state = {

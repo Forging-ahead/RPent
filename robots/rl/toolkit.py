@@ -34,6 +34,7 @@ from robots.rl.units import (
     EPISODE_CONTRACT_VERSION,
     argument_hint,
     coordinate_definition,
+    default_image_size,
     model_tool,
     strict_tool,
     validate_relations,
@@ -137,6 +138,37 @@ MobileAction = Annotated[
 ]
 
 
+def _compact_action_result(
+    index: int, action: str, full: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Keep only per-action incremental outcomes and errors; omit full robot state."""
+    item: dict[str, Any] = {
+        "index": index,
+        "action": action,
+        "status": full.get("status", "error"),
+    }
+    for key in (
+        "arm",
+        "reason",
+        "error",
+        "state_stale",
+        "env_steps",
+        "position_error_m",
+        "rotation_error_rad",
+        "opening_error",
+        "displacement_initial_base_m",
+        "yaw_change_rad",
+        "mount_height_change_m",
+        "translation_error_m",
+        "height_error_m",
+        "step",
+    ):
+        val = full.get(key)
+        if val is not None:
+            item[key] = val
+    return item
+
+
 class ActionBatch:
     """Execute 1..K physical actions strictly in order."""
 
@@ -145,16 +177,21 @@ class ActionBatch:
 
     @tool
     def execute_actions(
-        self, actions: Annotated[list[Action], Field(min_length=1)]
+        self,
+        actions: Annotated[list[Action], Field(min_length=1)],
+        observe: str = "none",
     ) -> ToolResult:
-        """Execute 1..K move_to/set_gripper actions strictly in list order. The entire list is validated before any movement. Each item finishes and is measured before the next begins. Stop immediately on native success, truncation, error or partial; remaining items are not executed. Returns every executed result and pose, executed_count, zero-based stopped_at, stop_reason and final_state. Use view_env to see the scene after motion. Example: {"actions":[{"action":"move_to","xyz":[0.1,0,0.3]},{"action":"set_gripper","opening":0}]}.
+        """Execute 1..K move_to/set_gripper actions strictly in list order. The entire list is validated before any movement. Each item finishes and is measured before the next begins. Stop immediately on native success, truncation, error or partial; remaining items are not executed. Returns compact per-item outcomes, executed_count, zero-based stopped_at, stop_reason and final_state. Set observe to a camera name or "all" to capture RGB immediately after the batch without an extra view_env turn. Example: {"actions":[{"action":"move_to","xyz":[0.1,0,0.3]},{"action":"set_gripper","opening":0}],"observe":"wrist"}.
 
         Args:
             actions: Ordered list, at most the configured K; each item is move_to with xyz/orientation_rpy or set_gripper with opening. Omitted move targets keep the state measured at that item's start. The list contains only physical actions.
+            observe: Optional post-batch camera capture ("none", "all", or one declared camera name). Defaults to "none".
         """
-        return self._execute_actions(actions)
+        return self._execute_actions(actions, observe=observe)
 
-    def _execute_actions(self, actions: Sequence[BaseModel]) -> ToolResult:
+    def _execute_actions(
+        self, actions: Sequence[BaseModel], *, observe: str = "none"
+    ) -> ToolResult:
         tk = self.toolkit
         assert tk is not None
         results, reason, stopped_at = [], None, None
@@ -197,7 +234,7 @@ class ActionBatch:
             tk.workflow_stats["atomic_actions"] = (
                 tk.workflow_stats.get("atomic_actions", 0) + 1
             )
-            results.append({"index": index, "action": name, **result.data})
+            results.append(_compact_action_result(index, name, result.data))
             stopped_at = index
             if result.data.get("terminated") or result.data.get("truncated"):
                 reason = "terminated" if result.data.get("terminated") else "truncated"
@@ -213,20 +250,36 @@ class ActionBatch:
             tk.workflow_stats["batch_pauses"] = (
                 tk.workflow_stats.get("batch_pauses", 0) + 1
             )
-        return ToolResult(
-            data={
-                "status": "completed" if reason is None else "stopped",
-                "results": results,
-                "executed_count": len(results),
-                "stopped_at": stopped_at,
-                "stop_reason": reason,
-                "final_state": (
-                    tk._primitives.latest_snapshot.state
-                    if tk.infrastructure_error is not None
-                    else tk._robot_state()
-                ),
-            }
+        final_step = tk._primitives.latest_step
+        final_state = (
+            {"step": final_step, **tk._primitives.latest_snapshot.state}
+            if tk.infrastructure_error is not None
+            else {"step": final_step, **tk._robot_state()}
         )
+        data: dict[str, Any] = {
+            "status": "completed" if reason is None else "stopped",
+            "results": results,
+            "executed_count": len(results),
+            "stopped_at": stopped_at,
+            "stop_reason": reason,
+            "final_state": final_state,
+        }
+        obs_images: list[bytes] = []
+        if (
+            observe != "none"
+            and tk.infrastructure_error is None
+            and not tk._primitives.ended
+            and not final_state.get("terminated")
+            and not final_state.get("truncated")
+        ):
+            obs_step = tk._primitives.latest_step
+            obs_images, summaries = tk._collect_views(observe, obs_step)
+            data["observation"] = {
+                "step": obs_step,
+                "camera": observe,
+                "images": summaries,
+            }
+        return ToolResult(data=data, images=obs_images)
 
 
 class PositionMoveAction(BaseModel):
@@ -247,32 +300,49 @@ PositionAction = Annotated[
 class PositionActionBatch(ActionBatch):
     @tool
     def execute_actions(
-        self, actions: Annotated[list[PositionAction], Field(min_length=1)]
+        self,
+        actions: Annotated[list[PositionAction], Field(min_length=1)],
+        observe: str = "none",
     ) -> ToolResult:
-        """Execute 1..K move_to/set_gripper actions strictly in list order. The entire list is validated before any movement. Each item finishes and is measured before the next begins. Stop immediately on native success, truncation, error or partial; remaining items are not executed. Returns every executed result and pose, executed_count, zero-based stopped_at, stop_reason and final_state. Use view_env to see the scene after motion. Example: {"actions":[{"action":"move_to","xyz":[0.1,0,0.3]},{"action":"set_gripper","opening":0}]}.
+        """Execute 1..K move_to/set_gripper actions strictly in list order. The entire list is validated before any movement. Each item finishes and is measured before the next begins. Stop immediately on native success, truncation, error or partial; remaining items are not executed. Returns compact per-item outcomes, executed_count, zero-based stopped_at, stop_reason and final_state. Set observe to a camera name or "all" to capture RGB immediately after the batch, or use view_env without moving. Example: {"actions":[{"action":"move_to","xyz":[0.1,0,0.3]},{"action":"set_gripper","opening":0}],"observe":"gripperPOV"}.
 
         Args:
             actions: Ordered list, at most the configured K; each item is move_to with xyz only (fixed wrist orientation) or set_gripper with opening from 0 to 1. The list contains only physical actions.
+            observe: Optional post-batch camera capture ("none", "all", or one declared camera name). Defaults to "none".
         """
-        return self._execute_actions(actions)
+        return self._execute_actions(actions, observe=observe)
 
 
 class DualArmBatch(ActionBatch):
     @tool
     def execute_actions(
-        self, actions: Annotated[list[ArmAction], Field(min_length=1)]
+        self,
+        actions: Annotated[list[ArmAction], Field(min_length=1)],
+        observe: str = "none",
     ) -> ToolResult:
-        """Execute 1..K actions strictly in order. Each move_to or set_gripper names one left or right arm. The other arm holds its last target. Read the measured results; partial, error, native success or truncation stops the remaining list. Use view_env for RGB."""
-        return self._execute_actions(actions)
+        """Execute 1..K actions strictly in order. Each move_to or set_gripper names one left or right arm. The other arm holds its last target. Read the compact per-item results and final_state; partial, error, native success or truncation stops the remaining list. Set observe to a camera name or "all" to capture RGB after the batch (default "none").
+
+        Args:
+            actions: Ordered list, at most the configured K; each item specifies arm ("left" or "right").
+            observe: Optional post-batch camera capture ("none", "all", or one declared camera name). Defaults to "none".
+        """
+        return self._execute_actions(actions, observe=observe)
 
 
 class MobileBatch(ActionBatch):
     @tool
     def execute_actions(
-        self, actions: Annotated[list[MobileAction], Field(min_length=1)]
+        self,
+        actions: Annotated[list[MobileAction], Field(min_length=1)],
+        observe: str = "none",
     ) -> ToolResult:
-        """Execute 1..K ordered move_base, move_lift, move_to or set_gripper items. Each item controls one component. An arm target uses the selected coordinate convention at the start of its item. In general coordinates the mount follows the base and lift; supply the target for the frame after each preceding item. Partial, error, success or truncation stops the remaining list. Use view_env for RGB."""
-        return self._execute_actions(actions)
+        """Execute 1..K ordered move_base, move_lift, move_to or set_gripper items. Each item controls one component. An arm target uses the selected coordinate convention at the start of its item. In general coordinates the mount follows the base and lift; supply the target for the frame after each preceding item. Partial, error, success or truncation stops the remaining list. Set observe to a camera name or "all" to capture RGB after the batch (default "none").
+
+        Args:
+            actions: Ordered list, at most the configured K.
+            observe: Optional post-batch camera capture ("none", "all", or one declared camera name). Defaults to "none".
+        """
+        return self._execute_actions(actions, observe=observe)
 
 
 def system_prompt(variables: Mapping[str, object] | None = None) -> str:
@@ -288,10 +358,16 @@ def system_prompt(variables: Mapping[str, object] | None = None) -> str:
             "Call the next tool directly without reasoning or explanatory text.",
         )
     limit = variables.get("max_actions_per_call", 3)
-    sections.append(
-        f"Action interface: execute_actions takes one to {limit} physical items in order, including single-item lists. "
-        "Read each measured result. A partial result, error or terminal stops the remaining items."
-    )
+    action_lines = [
+        f"Action interface: execute_actions takes one to {limit} physical items in order, including single-item lists, plus an optional observe parameter (\"none\", \"all\", or one declared camera name; default \"none\").",
+        "Read each measured result and final_state. A partial result, error or terminal stops the remaining items.",
+        "The coordinates block is provided at episode start and whenever frame_version changes.",
+    ]
+    if variables.get("include_jaw_mm", False):
+        action_lines.append(
+            "jaw_mm reports the measured physical inner clearance between the two gripper pads in millimetres; compare it with object size_xyz_cm to help judge whether an object is held."
+        )
+    sections.append(" ".join(action_lines))
     sections.append(
         "Older reasoning or camera images may be removed from the conversation. "
         "Use a new view when you need pixels absent from the current history."
@@ -305,13 +381,18 @@ def user_prompt(variables: Mapping[str, object] | None = None) -> str:
 
 
 def render_prompts(
-    environment: str, *, reasoning: bool = True, max_actions_per_call: int = 3
+    environment: str,
+    *,
+    reasoning: bool = True,
+    max_actions_per_call: int = 3,
+    include_jaw_mm: bool = False,
 ) -> tuple[str, str]:
     """Return ``(system_prompt, user_message)`` for an RL episode."""
     variables = {
         "environment": environment,
         "reasoning": reasoning,
         "max_actions_per_call": max_actions_per_call,
+        "include_jaw_mm": include_jaw_mm,
     }
     return system_prompt(variables), user_prompt(variables)
 
@@ -378,14 +459,20 @@ class RLToolkit(Toolkit):
         record_artifacts: bool = False,
         dashboard_events: DashboardEventSink | None = None,
         memory: MemoryManager | None = None,
-        image_size: int = 1024,
+        image_size: int | None = None,
         max_actions_per_call: int = 3,
         reasoning: bool = True,
+        include_jaw_mm: bool = False,
     ) -> None:
         self.environment = environment
         self.reasoning = reasoning
         self.max_actions_per_call = max_actions_per_call
-        self.image_size = image_size
+        resolved_image_size = (
+            default_image_size(environment) if image_size is None else int(image_size)
+        )
+        self.image_size = resolved_image_size
+        self.include_jaw_mm = bool(include_jaw_mm)
+        self._last_sent_frame_version: int | None = None
         self.record_artifacts = record_artifacts and output_dir is not None
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.workflow_stats: dict[str, Any] = {"perception_seconds": 0.0}
@@ -406,11 +493,14 @@ class RLToolkit(Toolkit):
             record_artifacts=self.record_artifacts,
             **runtime_kwargs,
         )
-        if environment == "robolab" or (
-            environment in {"libero", "robocasa", "metaworld"}
-            and image_size != NATIVE_SIZE
+        if resolved_image_size is not None and (
+            environment == "robolab"
+            or (
+                environment in {"libero", "robocasa", "metaworld"}
+                and resolved_image_size != NATIVE_SIZE
+            )
         ):
-            self._primitives.display_size = image_size
+            self._primitives.display_size = resolved_image_size
         self._task = self._primitives.env.get_task_language()
         record = self._primitives.record_observation()
         if record is not None:
@@ -434,28 +524,72 @@ class RLToolkit(Toolkit):
         return getattr(getattr(self._primitives, "coordinates", None), "version", 0)
 
     def _model_feedback(self, result: ToolResult) -> ToolResult:
-        result.data["coordinates"] = self._primitives.coordinates.description()
         result.data = CENTIMETERS.payload(result.data)
-        result.data["position_unit"] = "cm"
+        result.data.pop("position_unit", None)
+        current_version = self.frame_version()
+        if self._last_sent_frame_version != current_version:
+            result.data["coordinates"] = CENTIMETERS.payload(
+                self._primitives.coordinates.description()
+            )
+            result.data["position_unit"] = "cm"
+            self._last_sent_frame_version = current_version
         return result
 
     def _robot_state(self) -> dict[str, Any]:
         if self.environment == "libero":
             env = self._primitives.env
-            return {
+            state: dict[str, Any] = {
                 **self._primitives.measure().state(),  # type: ignore[attr-defined]
                 "terminated": bool(env.terminated),
                 "truncated": bool(env.truncated),
             }
-        state = self._primitives.robot_state()
-        return {**state, **self._primitives.terminal_flags(state)}
+        else:
+            raw_state = self._primitives.robot_state()
+            state = {**raw_state, **self._primitives.terminal_flags(raw_state)}
+        if self.include_jaw_mm:
+            jaw_fn = getattr(self._primitives, "jaw_mm", None)
+            if callable(jaw_fn):
+                jaw = jaw_fn()
+                if isinstance(jaw, Mapping):
+                    for arm, value in jaw.items():
+                        if isinstance(state.get(arm), Mapping):
+                            state[arm] = {**state[arm], "jaw_mm": round(float(value), 1)}
+                elif jaw is not None:
+                    state["jaw_mm"] = round(float(jaw), 1)
+                    state.pop("finger_gap_m", None)
+        else:
+            state.pop("jaw_mm", None)
+            for arm in ("left", "right"):
+                if isinstance(state.get(arm), Mapping) and "jaw_mm" in state[arm]:
+                    arm_state = dict(state[arm])
+                    arm_state.pop("jaw_mm", None)
+                    state[arm] = arm_state
+        return state
+
+    def _collect_views(
+        self, camera: str, step: int
+    ) -> tuple[list[bytes], list[dict[str, Any]]]:
+        names = self._primitives.cameras if camera == "all" else (camera,)
+        images: list[bytes] = []
+        summaries: list[dict[str, Any]] = []
+        for name in names:
+            _, _, cap, _, displayed, metadata = self._primitives._query_view(name, step)
+            images.append(cap.annotated_png(displayed))
+            summaries.append({"camera": name, "size": metadata["size"]})
+        return images, summaries
 
     def initial_observation(self) -> ToolResult:
-        """Return the task and measured initial state for the opening user message."""
+        """Return the task, measured initial state, and step=0 camera views."""
         self._started = time.perf_counter()
         step = self._primitives.latest_step
+        images, summaries = self._collect_views("all", step)
         obs = ToolResult(
-            data={"task": self._task, "state": {"step": step, **self._robot_state()}}
+            data={
+                "task": self._task,
+                "state": {"step": step, **self._robot_state()},
+                "images": summaries,
+            },
+            images=images,
         )
         obs = self._model_feedback(obs)
         self._count_images(obs)
@@ -472,6 +606,11 @@ class RLToolkit(Toolkit):
                 field: getattr(parameters, field)
                 for field in type(parameters).model_fields
             }
+            if name == "execute_actions":
+                observe = arguments.get("observe", "none")
+                allowed = ("none", "all", *self._primitives.cameras)
+                if not isinstance(observe, str) or observe not in allowed:
+                    raise ValueError(f"observe must be one of {list(allowed)}")
             validate_relations(name, arguments)
         except (ValueError, TypeError) as exc:
             return ToolResult(

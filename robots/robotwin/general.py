@@ -15,6 +15,7 @@ from robots.rl.geometry import (
     grasp_axes,
     mounting_calibration,
     pose_matrix,
+    rpy_of,
 )
 
 
@@ -47,8 +48,8 @@ class RobotwinFrame:
         pose = pose_matrix(native_tcp)
         rotation = self.coordinates.orientation(pose[:3, :3] @ self.tool_rotation(arm))
         return {
-            "xyz": self.coordinates.points(pose[:3, 3]).tolist(),
-            "orientation_rpy": Rotation.from_matrix(rotation).as_euler("xyz").tolist(),
+            "xyz": [round(float(v), 4) for v in self.coordinates.points(pose[:3, 3])],
+            "orientation_rpy": rpy_of(rotation),
         }
 
     def world_target(self, xyz: Any, rpy: Any, current: Any, arm: str) -> np.ndarray:
@@ -119,7 +120,7 @@ def _collision_vertices(body: Any) -> np.ndarray:
 def robotwin_calibration(task: Any) -> dict[str, Any]:
     """Read installation mounts, collision-table top and each native tool's axes."""
     robot = task.robot
-    mounts, axes = {}, {}
+    mounts, axes, pad_offsets = {}, {}, {}
     for arm in ("left", "right"):
         root = getattr(robot, f"{arm}_arm_joints")[0].parent_link
         mounts[arm] = root.get_pose().p
@@ -135,6 +136,11 @@ def robotwin_calibration(task: Any) -> dict[str, Any]:
         centres = finger_contact_centres(*points)
         approach = tcp[:3, :3].T @ (tcp[:3, 3] - wrist[:3, 3])
         axes[arm] = grasp_axes(centres[1] - centres[0], approach).tolist()
+        local_offsets = []
+        for centre, pose in zip(centres, finger_poses, strict=True):
+            world_pad = tcp[:3, :3] @ centre + tcp[:3, 3]
+            local_offsets.append((pose[:3, :3].T @ (world_pad - pose[:3, 3])).tolist())
+        pad_offsets[arm] = local_offsets
     table_pose = task.table.get_pose().to_transformation_matrix()
     table_points = (
         _collision_vertices(task.table) @ table_pose[:3, :3].T + table_pose[:3, 3]
@@ -143,4 +149,8 @@ def robotwin_calibration(task: Any) -> dict[str, Any]:
     top[2] = table_points[:, 2].max()
     calibration = mounting_calibration(mounts["left"], mounts["right"], top)
     calibration["tcp"] = "native_grasp_tcp"
-    return {"coordinate_calibration": calibration, "tool_rotation_to_native": axes}
+    return {
+        "coordinate_calibration": calibration,
+        "tool_rotation_to_native": axes,
+        "pad_offsets_in_finger_m": pad_offsets,
+    }

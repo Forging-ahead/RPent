@@ -230,6 +230,9 @@ class LiberoRLPrimitives(RecordedPerception):
             native.opening,
         )
 
+    def jaw_mm(self) -> float:
+        return round(max(0.0, self._finger_gap()) * 1000.0, 1)
+
     def robot_state(self) -> dict[str, Any]:
         return {
             **self.measure().state(),

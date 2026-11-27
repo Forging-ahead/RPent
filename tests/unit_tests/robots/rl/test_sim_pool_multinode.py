@@ -155,7 +155,21 @@ def _make_fake_backend(name: str, capacity: int, *, sleepable: bool) -> FastAPI:
         state["seq"] += 1
         sid = f"{name}-{state['seq']}"
         state["sessions"][sid] = body.get("cohort_id")
-        return {"session_id": sid, "backend": name}
+        meta = {
+            "session_id": sid,
+            "backend": name,
+            "image_cameras": ["head"],
+        }
+        img = b"\x89PNG-open-" + name.encode()
+        accept = req.headers.get("accept", "")
+        if BINARY_EXECUTE_MEDIA_TYPE in accept or "application/octet-stream" in accept:
+            return Response(
+                content=pack_execute_response(meta, [img]),
+                media_type=BINARY_EXECUTE_MEDIA_TYPE,
+            )
+        import base64
+
+        return {**meta, "images_b64": [base64.b64encode(img).decode("ascii")]}
 
     @app.post("/sessions/{sid}/execute")
     async def execute(sid: str, req: Request):
@@ -230,6 +244,19 @@ def test_sim_pool_router_balances_and_proxies_binary_and_lifecycle() -> None:
             backends_hit = [row["backend"] for row in opened]
             assert backends_hit.count("h100") == 2
             assert backends_hit.count("a100") == 4
+            assert all(len(row["images_b64"]) == 1 for row in opened)
+
+            # Binary /sessions/open passthrough via router without PNG re-encoding
+            bin_open_resp = await router.open_session(
+                {"task": {}, "cohort_id": "c-bin"},
+                accept=BINARY_EXECUTE_MEDIA_TYPE,
+            )
+            assert isinstance(bin_open_resp, Response)
+            assert bin_open_resp.media_type == BINARY_EXECUTE_MEDIA_TYPE
+            bin_meta, bin_imgs = unpack_execute_response(bin_open_resp.body)
+            assert bin_meta["session_id"] in router._sessions
+            assert bin_imgs == [b"\x89PNG-open-" + bin_meta["backend"].encode()]
+            await router.close_session(bin_meta["session_id"])
 
             # Zero-Base64 binary /execute passthrough
             sid0 = opened[0]["session_id"]

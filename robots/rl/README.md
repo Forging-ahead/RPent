@@ -37,7 +37,13 @@ robots/rl/server.py  (FastAPI + SimPoolManager over Unix-socket warm workers)
 4. **Zero-Base64 binary `/execute` transport**:
    When a client sends `Accept: application/vnd.rpent.execute+octet-stream`, `POST /sessions/{sid}/execute` streams a compact length-prefixed binary frame (`[u32 meta_len][utf8 JSON meta][u32 num_images][u32 img_len][raw PNG bytes]...`), falling back to Base64 JSON when not requested. `EpisodeConversation` stores lightweight `rpent-image://<fid>` placeholders plus raw PNG `bytes` references without eager Base64 encoding or deep-copying across turns.
 5. **Pydantic-AI–compatible conversation & history compaction**:
-   `robots/rl/conversation.py` mirrors the exact validation retry and sliding-window history compaction semantics used in RLinf, enabling identical standalone evaluation and trajectory collection.
+   `robots/rl/conversation.py` mirrors the exact validation retry and history compaction semantics used in RLinf (`--context-management base|dynamic`), enabling identical standalone evaluation and trajectory collection.
+6. **Harness v2 protocol optimizations (all 6 simulators: `libero`, `robocasa`, `robotwin`, `robodojo`, `robolab`, `metaworld`)**:
+   - **Compact feedback (F1)**: `coordinates` and `position_unit` are emitted only on `initial_observation` and whenever `frame_version` changes (e.g., RoboCasa `move_base`/`move_lift`); `execute_actions` returns compact per-item outcomes and a single top-level `final_state` with uniform rounding (`xyz` 4dp m → 2dp cm, `orientation_rpy` 3dp rad, `opening` 3dp).
+   - **Per-environment default display resolution (F2)**: When `image_size=None` (default), `libero` / `robocasa` / `metaworld` display `512×512` (native `1024×1024` RGB-D preserved for SAM3/depth), `robolab` displays `768×432` (native `1280×720` preserved), and `robotwin` (`320×240`) / `robodojo` (`640×480`) remain native.
+   - **Optional physical `jaw_mm` (F3)**: `--include-jaw-mm` / `OpenRequest.include_jaw_mm` exposes measured inner-pad clearance in millimetres across all 6 simulators (`state["jaw_mm"]` for single-arm, `state[arm]["jaw_mm"]` for dual-arm; untouched by centimetre scaling).
+   - **Dynamic batch compaction (F4)**: `--context-management dynamic` triggers at high-water mark to strip older intermediate images (`[image omitted]`) and older assistant `reasoning_content` while preserving `messages[0]` (including step=0 opening images) and full action/tool text, falling back to `base` sliding window if still over budget.
+   - **Step-0 opening images & `execute_actions(..., observe=...)` (F5)**: `POST /sessions/open` streams `step=0` all-camera PNGs via binary framing through both `SimPoolManager` and `SimPoolRouter`; `execute_actions` accepts optional `observe` (`"none"`, `"all"`, or a per-env camera name) to capture post-batch RGB in one turn while keeping `view_env` for motion-free inspection.
 
 ## Deploying Simulator & SAM3 Pools
 

@@ -298,3 +298,471 @@ def test_sim_pool_replace_worker_is_idempotent():
         assert spawned == [0]
 
     asyncio.run(_run())
+
+
+def test_harness_v2_centimeters_preserves_jaw_mm():
+    cm = Centimeters()
+    out = cm.payload(
+        {
+            "opening": 0.45,
+            "jaw_mm": 36.2,
+            "position_error_m": 0.0025,
+            "left": {"opening": 0.5, "jaw_mm": 44.0, "pose": {"xyz": [0.1, -0.2, 0.3]}},
+        },
+        to_model=True,
+    )
+    assert out["jaw_mm"] == 36.2
+    assert out["position_error_cm"] == 0.25
+    assert out["left"]["jaw_mm"] == 44.0
+    assert out["left"]["pose"]["xyz"] == [10.0, -20.0, 30.0]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_observe"),
+    [
+        ("libero", ["none", "all", "agentview", "wrist"]),
+        ("robotwin", ["none", "all", "head", "left_wrist", "right_wrist"]),
+        ("robocasa", ["none", "all", "agentview", "agentview_right", "wrist"]),
+        ("robodojo", ["none", "all", "cam_head", "cam_left_wrist", "cam_right_wrist"]),
+        ("robolab", ["none", "all", "over_shoulder_left_camera", "wrist_cam"]),
+        ("metaworld", ["none", "all", "corner2", "gripperPOV"]),
+    ],
+)
+def test_harness_v2_observe_enum_and_prompts_all_6_envs(
+    env: str, expected_observe: list[str]
+):
+    from robots.rl.toolkit import openai_tool_schemas
+
+    tools = {t.name: t for t in episode_tools(None, env)}
+    assert set(tools) == {"view_env", "segment", "back_project", "execute_actions"}
+    observe_schema = tools["execute_actions"].input_schema["properties"]["observe"]
+    assert observe_schema["enum"] == expected_observe
+
+    # Schema rejects invalid observe values via EpisodeConversation.validate_or_retry
+    sys_p, usr_m = render_prompts(
+        env, reasoning=True, max_actions_per_call=3, include_jaw_mm=True
+    )
+    assert "Images are supplied only through view_env" not in sys_p
+    assert "step=0" in sys_p
+    assert "observe" in sys_p
+    assert "jaw_mm" in sys_p
+    sys_no_jaw, _ = render_prompts(env, include_jaw_mm=False)
+    assert "jaw_mm" not in sys_no_jaw
+
+    conv = EpisodeConversation(
+        system_prompt=sys_p,
+        user_message=usr_m,
+        initial_observation_text="{}",
+        tools=openai_tool_schemas(list(tools.values())),
+        environment=env,
+    )
+    bad_action = (
+        {"action": "set_gripper", "arm": "left", "opening": 0}
+        if env in {"robotwin", "robodojo"}
+        else {"action": "set_gripper", "opening": 0}
+    )
+    err_kind, _, _, _ = conv.validate_or_retry(
+        [
+            {
+                "id": "c1",
+                "name": "execute_actions",
+                "arguments": {
+                    "actions": [bad_action],
+                    "observe": "invalid_camera_name",
+                },
+            }
+        ]
+    )
+    assert err_kind == "tool_arguments"
+    ok_kind, _, parsed, _ = conv.validate_or_retry(
+        [
+            {
+                "id": "c2",
+                "name": "execute_actions",
+                "arguments": {
+                    "actions": [bad_action],
+                    "observe": expected_observe[-1],
+                },
+            }
+        ]
+    )
+    assert ok_kind is None and parsed is not None
+    assert parsed["observe"] == expected_observe[-1]
+
+
+def test_harness_v2_f1_f2_f3_f5_toolkit_across_all_6_envs(monkeypatch):
+    import io
+    import json
+
+    from PIL import Image
+
+    from robots.rl.geometry import Coordinates
+    from robots.rl.perception import RecordedPerception
+    from robots.rl.toolkit import RLToolkit
+    from robots.rl.units import CAMERAS
+    from rpent.tools import ToolResult
+
+    env_specs = {
+        "libero": ((1024, 1024), (512, 512), False, 42.5),
+        "robocasa": ((1024, 1024), (512, 512), False, 51.0),
+        "metaworld": ((1024, 1024), (512, 512), False, 35.3),
+        "robolab": ((720, 1280), (432, 768), False, 64.2),
+        "robotwin": ((240, 320), (240, 320), True, {"left": 22.4, "right": 58.1}),
+        "robodojo": ((480, 640), (480, 640), True, {"left": 18.0, "right": 88.0}),
+    }
+
+    for env_name, (native_hw, expected_hw, is_dual, expected_jaw) in env_specs.items():
+        cams = CAMERAS[env_name]
+
+        class _FakeEnv:
+            terminated = False
+            truncated = False
+
+            def get_task_language(self) -> str:
+                return f"Do {env_name} task"
+
+        class _FakePrimitives(RecordedPerception):
+            cameras = cams
+
+            def __init__(self, *, env, sam3_client, state, check_cancelled, **kwargs):
+                self._init_perception(
+                    env=env,
+                    sam3_client=sam3_client,
+                    state=state,
+                    check_cancelled=check_cancelled,
+                    max_episode_steps=100,
+                )
+                self.coordinates = Coordinates(
+                    origin=np.zeros(3),
+                    rotation=np.eye(3),
+                    table_height_m=0.0,
+                    version=0,
+                )
+                self._capture_calls = 0
+
+            def _display_shape(self, native_shape: tuple[int, int]) -> tuple[int, int]:
+                if env_name == "robolab":
+                    if self.display_size is None or max(native_shape) <= self.display_size:
+                        return native_shape
+                    h, w = native_shape
+                    scale = self.display_size / max(native_shape)
+                    return max(1, round(h * scale)), max(1, round(w * scale))
+                return super()._display_shape(native_shape)
+
+            def _refresh_coordinates(self):
+                pass
+
+            def native_success(self) -> bool:
+                return bool(self.env.terminated)
+
+            def measure(self):
+                class _M:
+                    def state(self):
+                        return {
+                            "pose": {
+                                "xyz": [0.1, 0.2, 0.3],
+                                "orientation_rpy": [3.142, 0.0, 0.0],
+                            },
+                            "opening": 0.5,
+                        }
+
+                return _M()
+
+            def jaw_mm(self):
+                return expected_jaw
+
+            def robot_state(self):
+                if is_dual:
+                    return {
+                        "left": {
+                            "pose": {
+                                "xyz": [0.1, 0.2, 0.3],
+                                "orientation_rpy": [3.142, 0.0, 0.0],
+                            },
+                            "opening": 0.5,
+                        },
+                        "right": {
+                            "pose": {
+                                "xyz": [0.1, -0.2, 0.3],
+                                "orientation_rpy": [3.142, 0.0, 0.0],
+                            },
+                            "opening": 0.8,
+                        },
+                    }
+                return {
+                    "pose": {
+                        "xyz": [0.1, 0.2, 0.3],
+                        "orientation_rpy": [3.142, 0.0, 0.0],
+                    },
+                    "opening": 0.5,
+                    "finger_gap_m": 0.05,
+                }
+
+            def capture(self, camera: str):
+                self._capture_calls += 1
+                h, w = native_hw
+                rgb = np.full((h, w, 3), 120, dtype=np.uint8)
+                world = np.ones((h, w, 3), dtype=np.float32)
+                return rgb, world, {"height": h, "width": w}
+
+            def move_to(self, **kwargs):
+                self.env_steps += 5
+                return ToolResult(
+                    data={
+                        "status": "reached",
+                        "env_steps": 5,
+                        "position_error_m": 0.0012,
+                        "rotation_error_rad": 0.004,
+                        **({"arm": kwargs["arm"]} if "arm" in kwargs else {}),
+                    }
+                )
+
+            def set_gripper(self, **kwargs):
+                self.env_steps += 2
+                return ToolResult(
+                    data={
+                        "status": "reached",
+                        "env_steps": 2,
+                        "opening_error": 0.01,
+                        **({"arm": kwargs["arm"]} if "arm" in kwargs else {}),
+                    }
+                )
+
+            def move_base(self, **kwargs):
+                self.env_steps += 10
+                self.coordinates = Coordinates(
+                    origin=np.array([0.1, 0.0, 0.0]),
+                    rotation=np.eye(3),
+                    table_height_m=0.0,
+                    version=self.coordinates.version + 1,
+                )
+                return ToolResult(
+                    data={
+                        "status": "commanded",
+                        "env_steps": 10,
+                        "displacement_initial_base_m": [0.1, 0.0, 0.0],
+                        "yaw_change_rad": 0.0,
+                        "mount_height_change_m": 0.0,
+                        "translation_error_m": 0.002,
+                    }
+                )
+
+        monkeypatch.setattr("robots.rl.toolkit.primitive_owner", lambda _: _FakePrimitives)
+
+        # 1) Default include_jaw_mm=False and image_size=None (F2 + F3 off + F5 opening)
+        tk_off = RLToolkit(
+            runtime_kwargs={"env": _FakeEnv(), "sam3_client": None},
+            environment=env_name,
+        )
+        obs_off = tk_off.initial_observation()
+        assert "coordinates" in obs_off.data
+        assert obs_off.data["position_unit"] == "cm"
+        assert len(obs_off.images) == len(cams)
+        assert [item["camera"] for item in obs_off.data["images"]] == list(cams)
+        for img_bytes, item in zip(obs_off.images, obs_off.data["images"], strict=True):
+            assert item["size"] == list(expected_hw)
+            with Image.open(io.BytesIO(img_bytes)) as pil:
+                assert pil.size == (expected_hw[1], expected_hw[0])
+        if is_dual:
+            assert "jaw_mm" not in obs_off.data["state"]["left"]
+            assert "jaw_mm" not in obs_off.data["state"]["right"]
+        else:
+            assert "jaw_mm" not in obs_off.data["state"]
+
+        # 2) include_jaw_mm=True (F1 + F3 on + F5 observe)
+        tk = RLToolkit(
+            runtime_kwargs={"env": _FakeEnv(), "sam3_client": None},
+            environment=env_name,
+            include_jaw_mm=True,
+        )
+        obs = tk.initial_observation()
+        assert "coordinates" in obs.data
+        if is_dual:
+            assert obs.data["state"]["left"]["jaw_mm"] == expected_jaw["left"]
+            assert obs.data["state"]["right"]["jaw_mm"] == expected_jaw["right"]
+        else:
+            assert obs.data["state"]["jaw_mm"] == expected_jaw
+            assert "finger_gap_cm" not in obs.data["state"]
+
+        # Subsequent view_env omits coordinates and position_unit
+        view = tk.execute_tool("view_env", {"camera": cams[0]})
+        assert "coordinates" not in view.data
+        assert "position_unit" not in view.data
+
+        # K=3 execute_actions with observe="none" is compact (<700 chars) and omits coordinates
+        if is_dual:
+            actions = [
+                {"action": "move_to", "arm": "left", "xyz": [10, 20, 30]},
+                {"action": "set_gripper", "arm": "left", "opening": 0},
+                {"action": "move_to", "arm": "right", "xyz": [10, -20, 30]},
+            ]
+        else:
+            actions = [
+                {"action": "move_to", "xyz": [10, 20, 30]},
+                {"action": "set_gripper", "opening": 0},
+                {"action": "move_to", "xyz": [10, 20, 35]},
+            ]
+        res_none = tk.execute_tool("execute_actions", {"actions": actions})
+        assert "coordinates" not in res_none.data
+        assert res_none.images == []
+        assert "observation" not in res_none.data
+        assert len(res_none.data["results"]) == 3
+        for item in res_none.data["results"]:
+            assert "pose" not in item and "terminated" not in item
+        assert res_none.data["results"][0]["position_error_cm"] == pytest.approx(0.12)
+        serialized = json.dumps(res_none.data, separators=(",", ":"))
+        limit = 800 if is_dual else 700
+        assert (
+            len(serialized) < limit
+        ), f"{env_name} payload too large ({len(serialized)}): {serialized}"
+
+        # execute_actions with observe=<single_cam> returns latest step image
+        target_cam = cams[-1]
+        res_obs = tk.execute_tool(
+            "execute_actions",
+            {"actions": [actions[0]], "observe": target_cam},
+        )
+        assert len(res_obs.images) == 1
+        assert res_obs.data["observation"]["camera"] == target_cam
+        assert res_obs.data["observation"]["step"] == res_obs.data["final_state"]["step"]
+        assert res_obs.data["observation"]["images"] == [
+            {"camera": target_cam, "size": list(expected_hw)}
+        ]
+
+        # Invalid observe rejected cleanly by execute_tool
+        bad_obs = tk.execute_tool(
+            "execute_actions",
+            {"actions": [actions[0]], "observe": "not_a_camera"},
+        )
+        assert "error" in bad_obs.data
+
+        # RoboCasa frame_version change triggers fresh coordinates once (no nested duplicate)
+        if env_name == "robocasa":
+            moved = tk.execute_tool(
+                "execute_actions",
+                {
+                    "actions": [
+                        {
+                            "action": "move_base",
+                            "vx": 10.0,
+                            "vy": 0.0,
+                            "yaw_rate": 0.0,
+                            "duration_s": 1.0,
+                        }
+                    ]
+                },
+            )
+            assert "coordinates" in moved.data
+            assert moved.data["coordinates"]["frame_version"] == 1
+            assert "coordinates" not in moved.data["final_state"]
+            after_move = tk.execute_tool("view_env", {"camera": cams[0]})
+            assert "coordinates" not in after_move.data
+
+        # Terminated episode skips observe image rendering
+        tk._primitives.env.terminated = True
+        res_term = tk.execute_tool(
+            "execute_actions",
+            {"actions": [actions[0]], "observe": target_cam},
+        )
+        assert res_term.images == []
+        assert "observation" not in res_term.data
+
+
+def test_harness_v2_dynamic_compaction_and_fallback():
+    png0 = encode_png(np.full((512, 512, 3), 10, dtype=np.uint8))
+    pngs = [
+        encode_png(np.full((512, 512, 3), 20 + i * 20, dtype=np.uint8))
+        for i in range(6)
+    ]
+    conv = EpisodeConversation(
+        system_prompt="SYS",
+        user_message="TASK",
+        initial_observation_text='{"step": 0, "images": [{"camera": "agentview", "size": [512, 512]}]}',
+        tools=[],
+        environment="libero",
+        initial_images=[png0],
+        initial_image_cameras=["agentview"],
+        compaction=CompactionConfig(
+            strategy="dynamic",
+            max_messages=None,
+            max_tokens=1500,
+            keep_messages=4,
+            keep_recent_images=2,
+            keep_recent_thinking=2,
+            preserve_opening_images=True,
+        ),
+    )
+    # Opening message carries step=0 image
+    assert conv.images() == [png0]
+    assert '<observation step="0" camera="agentview"' in str(conv.wire_messages()[1])
+
+    for i, img in enumerate(pngs):
+        cid = f"call_{i}"
+        conv.append_assistant(
+            content=None,
+            reasoning_content=f"long reasoning step {i} " + ("x" * 200),
+            tool_calls=[
+                {
+                    "id": cid,
+                    "type": "function",
+                    "function": {"name": "view_env", "arguments": "{}"},
+                }
+            ],
+        )
+        conv.append_tool_result(
+            tool_name="view_env",
+            tool_call_id=cid,
+            text=f'{{"step": {i + 1}}}',
+            images=[img],
+        )
+
+    old_wire_snapshot = [dict(m) for m in conv.wire_messages()]
+    old_first_tool_user_msg = conv.messages[2].wire[1]
+    assert conv.maybe_compact() is True
+
+    # Old wire dicts must NOT have been mutated in place
+    assert old_first_tool_user_msg["content"][2]["type"] == "image_url"
+    assert len(old_wire_snapshot) > 0
+
+    # All 1 + 12 logical messages preserved (no text dropped)
+    assert len(conv.messages) == 13
+    # Opening image + last 2 intermediate images preserved (3 total)
+    assert conv.images() == [png0, pngs[-2], pngs[-1]]
+    image_url_parts = [
+        part
+        for msg in conv.wire_messages()
+        if isinstance(msg.get("content"), list)
+        for part in msg["content"]
+        if part.get("type") == "image_url"
+    ]
+    assert len(image_url_parts) == len(conv.images()) == 3
+
+    # Older intermediate images replaced with [image omitted]
+    omitted_count = sum(
+        1
+        for msg in conv.wire_messages()
+        if isinstance(msg.get("content"), list)
+        for part in msg["content"]
+        if part == {"type": "text", "text": "[image omitted]"}
+    )
+    assert omitted_count == 4
+
+    # Only last 2 assistant messages retain reasoning_content
+    assistants = [m for m in conv.messages if m.kind == "assistant"]
+    assert all("reasoning_content" not in m.wire[0] for m in assistants[:-2])
+    assert all("reasoning_content" in m.wire[0] for m in assistants[-2:])
+
+    # Extreme pure-text overflow triggers base fallback cleanly (no infinite loop)
+    conv.compaction = CompactionConfig(
+        strategy="dynamic",
+        max_messages=None,
+        max_tokens=10,
+        keep_messages=4,
+        keep_recent_images=2,
+        keep_recent_thinking=2,
+        preserve_opening_images=True,
+    )
+    assert conv.maybe_compact() is True
+    assert len(conv.messages) <= 6
+    assert conv.messages[0].kind == "opening"
+    assert conv.messages[0].images == (png0,)

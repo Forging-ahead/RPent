@@ -133,22 +133,44 @@ class LocalRoboTwinEnv:
     def coordinate_calibration(self) -> dict[str, Any]:
         sub_env = self._env._sub_env(0)
         with sub_env.lock:
-            return robotwin_calibration(sub_env.task)
+            cal = robotwin_calibration(sub_env.task)
+            self._pad_offsets_in_finger_m = cal.get("pad_offsets_in_finger_m")
+            return cal
 
     def measured_grippers(self) -> dict[str, dict[str, float]]:
         sub_env = self._env._sub_env(0)
         with sub_env.lock:
             robot = sub_env.task.robot
+            pad_offsets = getattr(self, "_pad_offsets_in_finger_m", None)
             result = {}
             for side in ("left", "right"):
                 entity = getattr(robot, f"{side}_entity")
-                joint, multiplier, offset = getattr(robot, f"{side}_gripper")[0]
+                gripper_joints = getattr(robot, f"{side}_gripper")
+                joint, multiplier, offset = gripper_joints[0]
                 index = entity.get_active_joints().index(joint)
                 position = float(entity.get_qpos()[index])
                 low, high = getattr(robot, f"{side}_gripper_scale")
                 opening = ((position - offset) / multiplier - low) / (high - low)
+                jaw_mm: float | None = None
+                if pad_offsets and side in pad_offsets and len(gripper_joints) >= 2:
+                    fingers = [j.child_link for j, _, _ in gripper_joints[:2]]
+                    world_pads = []
+                    for link, local_offset in zip(
+                        fingers, pad_offsets[side][:2], strict=True
+                    ):
+                        mat = link.get_pose().to_transformation_matrix()
+                        world_pads.append(
+                            mat[:3, :3] @ np.asarray(local_offset, dtype=float)
+                            + mat[:3, 3]
+                        )
+                    jaw_mm = round(
+                        float(np.linalg.norm(world_pads[0] - world_pads[1])) * 1000.0, 1
+                    )
+                else:
+                    jaw_mm = round(abs(2.0 * position) * 1000.0, 1)
                 result[side] = {
-                    "opening": float(np.clip(opening, 0.0, 1.0)),
+                    "opening": round(float(np.clip(opening, 0.0, 1.0)), 3),
+                    "jaw_mm": jaw_mm,
                     "joint_position": position,
                     "commanded_opening": float(getattr(robot, f"{side}_gripper_val")),
                 }
@@ -253,11 +275,41 @@ class RoboTwinRLPrimitives(RecordedPerception):
         self._success |= bool(self.env.last_info["episode_status"]["eval_success"])
         return self._success
 
+    def jaw_mm(self) -> dict[str, float]:
+        cached = getattr(self, "_last_jaw_mm", None)
+        if cached is not None:
+            return dict(cached)
+        raw = self._call_measured_grippers()
+        return {
+            arm: round(
+                float(
+                    raw[arm]["jaw_mm"]
+                    if "jaw_mm" in raw[arm]
+                    else abs(2.0 * float(raw[arm].get("joint_position", 0.0))) * 1000.0
+                ),
+                1,
+            )
+            for arm in ("left", "right")
+            if arm in raw
+        }
+
     def robot_state(self) -> dict[str, Any]:
         native = self.env.last_info["robot_state"]
-        state = self._call_measured_grippers()
-        for arm, gripper in state.items():
-            gripper["pose"] = self.frame.model_pose(native[f"{arm}_tcp_pose"], arm)
+        raw = self._call_measured_grippers()
+        state: dict[str, Any] = {}
+        jaw_map: dict[str, float] = {}
+        for arm, gripper in raw.items():
+            state[arm] = {
+                "pose": self.frame.model_pose(native[f"{arm}_tcp_pose"], arm),
+                "opening": round(float(gripper["opening"]), 3),
+            }
+            if "jaw_mm" in gripper:
+                jaw_map[arm] = round(float(gripper["jaw_mm"]), 1)
+            elif "joint_position" in gripper:
+                jaw_map[arm] = round(
+                    abs(2.0 * float(gripper["joint_position"])) * 1000.0, 1
+                )
+        self._last_jaw_mm = jaw_map
         return state
 
     def annotate(
@@ -406,9 +458,12 @@ class RoboTwinRLPrimitives(RecordedPerception):
                 return result
             settling_steps += self.env_steps - before
             errors, reached = self._pose_errors(goals)
+        arm_err = errors[arm]
         result.data.update(
             status="reached" if reached else "partial",
-            errors=errors,
+            arm=arm,
+            position_error_m=round(arm_err["position_error_m"], 4),
+            rotation_error_rad=round(arm_err["rotation_error_rad"], 3),
             settling_steps=settling_steps,
         )
         if not reached:
@@ -465,11 +520,13 @@ class RoboTwinRLPrimitives(RecordedPerception):
         result = self.env.chunk_step(waypoints, action_type="qpos")
         self.env_steps += int(result[4]["executed_actions"])
         measured = self._call_measured_grippers()
-        reached = abs(measured[arm]["opening"] - opening) < _OPENING_TOL
+        actual_opening = float(measured[arm]["opening"])
+        reached = abs(actual_opening - opening) < _OPENING_TOL
         data: dict[str, Any] = {
             "status": "reached" if reached else "partial",
+            "arm": arm,
             "env_steps": self.env_steps,
-            "grippers": measured,
+            "opening_error": round(opening - actual_opening, 3),
         }
         if not reached:
             data["reason"] = "opening_differs"

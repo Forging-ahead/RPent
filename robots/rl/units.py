@@ -36,6 +36,19 @@ CAMERAS: dict[str, tuple[str, ...]] = {
     "robodojo": ("cam_head", "cam_left_wrist", "cam_right_wrist"),
     "robolab": ("over_shoulder_left_camera", "wrist_cam"),
 }
+DEFAULT_IMAGE_SIZE: dict[str, int | None] = {
+    "libero": 512,
+    "robocasa": 512,
+    "metaworld": 512,
+    "robolab": 768,  # 1280x720 -> 768x432 (exact 16:9 between 1024x576 and 512x288)
+    "robotwin": None,  # keeps native 320x240
+    "robodojo": None,  # keeps native 640x480
+}
+
+
+def default_image_size(environment: str) -> int | None:
+    """Return the default VLM display resolution for ``environment``."""
+    return DEFAULT_IMAGE_SIZE.get(environment, 512)
 
 _LENGTH_FIELDS = frozenset({"xyz", "world_xyz", "tcp_xyz", "base_xyz", "vx", "vy"})
 _LINEAR_BOUNDS = frozenset(
@@ -283,6 +296,8 @@ def strict_tool(declaration: Tool, *, cameras: tuple[str, ...] = ()) -> Tool:
             *(["all"] if declaration.name == "view_env" else []),
             *([None] if declaration.name in {"segment", "back_project"} else []),
         ]
+    if cameras and "observe" in properties and declaration.name == "execute_actions":
+        properties["observe"]["enum"] = ["none", "all", *cameras]
     if declaration.name == "segment":
         text, point = _present("prompt", "string"), _present("point", "array")
         text["properties"]["point"] = {"type": "null"}
@@ -352,13 +367,13 @@ def argument_hint(name: str, environment: str = "libero") -> str:
         "move_to",
         "set_gripper",
     }:
-        return "Use move_to with xyz only (fixed wrist orientation) or set_gripper with opening 0..1 in execute_actions."
+        return "Use move_to with xyz only (fixed wrist orientation) or set_gripper with opening 0..1 in execute_actions; optional observe must be none, all, or a declared camera."
     if environment in {"robotwin", "robodojo"} and name in {
         "execute_actions",
         "move_to",
         "set_gripper",
     }:
-        return "Follow the declared native action fields and orientation convention; include the selected arm where required."
+        return "Follow the declared native action fields and orientation convention; include the selected arm where required and use none, all, or a declared camera for observe."
     if environment == "robocasa" and name in {"move_to", "set_gripper"}:
         return (
             "Follow the declared move_to/set_gripper fields and orientation convention."
@@ -369,5 +384,5 @@ def argument_hint(name: str, environment: str = "libero") -> str:
         "move_to": "Supply xyz, orientation_rpy, or both as three finite numbers.",
         "move_base": "Supply bounded local velocities vx/vy/yaw_rate and duration_s within the declared limits.",
         "move_lift": "Supply delta_m within +/-0.25 and duration_s within 0.1..5.",
-        "execute_actions": "Supply a non-empty actions list within K; each item must be move_to with a target or set_gripper with opening 0..1.",
+        "execute_actions": "Supply a non-empty actions list within K; each item must be move_to with a target or set_gripper with opening 0..1, and optional observe must be none, all, or a declared camera.",
     }.get(name, "Follow the declared required fields and value ranges.")

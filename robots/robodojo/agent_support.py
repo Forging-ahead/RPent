@@ -377,6 +377,24 @@ def _motion_state(env) -> dict:
 
         state[f"{arm}_eef_pose"] = _finite_vector(pose, 7, "eef pose").tolist()
         state[f"{arm}_gripper"] = float(normalized(real))
+        pad_cal = getattr(env, "_rpent_finger_pad_cal", None)
+        if pad_cal and arm in pad_cal:
+            from robots.rl.geometry import pose_matrix
+
+            finger_links, pad_offsets = pad_cal[arm]
+            world_pads = []
+            for link, local_offset in zip(finger_links, pad_offsets, strict=True):
+                mat = pose_matrix(
+                    manager.get_link_pose(robot, link, [0], is_relative=False)[0]
+                )
+                world_pads.append(mat[:3, :3] @ local_offset + mat[:3, 3])
+            state[f"{arm}_jaw_mm"] = round(
+                float(np.linalg.norm(world_pads[0] - world_pads[1])) * 1000.0, 1
+            )
+        else:
+            state[f"{arm}_jaw_mm"] = round(
+                float(np.clip(normalized(real), 0.0, 1.0)) * abs(hi - lo) * 2000.0, 1
+            )
         arm_key = manager.process_name(robot.arm_name)
         gripper_key = manager.process_name(robot.gripper_name)
         # Missing targets indicate a broken/reset-incomplete controller, not
