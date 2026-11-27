@@ -31,9 +31,7 @@ def resize_image(data: bytes, size: int) -> bytes:
         if image.size == (size, size):
             return data
         output = io.BytesIO()
-        image.resize((size, size), Image.Resampling.LANCZOS).save(
-            output, format="PNG", compress_level=1
-        )
+        image.resize((size, size), Image.Resampling.LANCZOS).save(output, format="PNG")
         return output.getvalue()
 
 

@@ -65,61 +65,37 @@ def episode_tools(
     toolkit, environment, max_actions, perception=None, *, capabilities=None
 ):
     """Build the same model schema without importing native adapters on the client."""
-    from robots.rl.actions import (
-        ActionBatch,
-        DualArmBatch,
-        MobileBatch,
-        ToolTipBatch,
-    )
+    from robots.rl.actions import ActionBatch, DualArmBatch, MobileBatch
     from robots.rl.contracts import coordinate_definition, strict_tool
     from robots.rl.units import model_tool
 
     owner = RecordedPerception if perception is None else perception
-    if environment != "maniskill":
-        rgb = depth = CAMERAS[environment]
-        segment = True
+    if environment == "maniskill":
+        from robots.rl.maniskill import tool_profile
+
+        batch, cameras = tool_profile(toolkit, capabilities)
+    else:
         batch_type = {
             "libero": ActionBatch,
             "robocasa": MobileBatch,
             "robotwin": DualArmBatch,
             "robodojo": DualArmBatch,
         }[environment]
-    else:
-        rgb, depth = capabilities["rgb_cameras"], capabilities["depth_cameras"]
-        segment = capabilities["segment"]
-        if capabilities.get("mobile"):
-            batch_type = MobileBatch
-        elif not capabilities["gripper"]:
-            batch_type = ToolTipBatch
-        else:
-            batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
-    batch = batch_type(toolkit).execute_actions
+        batch = batch_type(toolkit).execute_actions
+        cameras = (CAMERAS[environment],) * 3
     schema = batch.input_schema
-    if environment == "maniskill" and batch_type is MobileBatch:
-        schema["$defs"]["BaseMove"]["properties"]["vy"].update(
-            minimum=0,
-            maximum=0,
-            description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
-        )
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
         batch,
         _input_schema=schema,
         description=batch.description.replace("1..K", f"1..{max_actions}"),
     )
-    camera_tools = (
-        ("view_env", rgb),
-        ("segment", rgb if segment else ()),
-        ("back_project", depth),
+    perception_tools = zip(
+        (owner.view_env, owner.segment, owner.back_project), cameras, strict=True
     )
-    tools = [(getattr(owner, name), cameras) for name, cameras in camera_tools if cameras]
-    for declaration, cameras in (*tools, (batch, ())):
-        yield model_tool(
-            strict_tool(
-                coordinate_definition(declaration),
-                cameras=cameras,
-            ),
-        )
+    tools = [(tool, views) for tool, views in perception_tools if views]
+    for declaration, views in (*tools, (batch, ())):
+        yield model_tool(strict_tool(coordinate_definition(declaration), cameras=views))
 
 
 class RLToolkit(Toolkit):
@@ -159,23 +135,17 @@ class RLToolkit(Toolkit):
             state=state, check_cancelled=self.raise_if_cancelled, **runtime_kwargs
         )
         native = self._primitives
-        self.tool_capabilities = None
+        self.tool_capabilities = getattr(native, "tool_capabilities", None)
         try:
-            if environment == "maniskill":
+            if environment == "maniskill" or (
+                environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE
+            ):
                 native.display_size = image_size
-                self._task = native.task
-                self.tool_capabilities = {
-                    "rgb_cameras": list(native.cameras),
-                    "depth_cameras": list(native.depth_cameras),
-                    "segment": bool(native.cameras) and native._sam3 is not None,
-                    "dual_arm": native.dual_arm,
-                    "mobile": bool(getattr(native, "mobile", False)),
-                    "gripper": native.has_gripper,
-                }
-            else:
-                if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
-                    native.display_size = image_size
-                self._task = native.env.get_task_language()
+            self._task = (
+                native.task
+                if environment == "maniskill"
+                else native.env.get_task_language()
+            )
             self.action_error = None
             self._publish_step(native.record_observation())
             self._recorded_env_steps = 0
@@ -209,19 +179,10 @@ class RLToolkit(Toolkit):
         """Register no file tools; rollouts observe only through robot tools."""
 
     def _robot_state(self) -> dict[str, Any]:
-        if self.environment == "maniskill":
-            return {
-                **self._primitives.robot_state(),
-                "terminated": self._primitives.terminated,
-                "truncated": self._primitives.truncated,
-            }
         if self.environment != "libero":
-            return {
-                **self._primitives.robot_state(),
-                "terminated": self._primitives.native_success(),
-                "truncated": self._primitives.env_steps
-                >= self._primitives._max_episode_steps,
-            }
+            state = self._primitives.robot_state()
+            terminated, truncated, _ = self._primitives._record_status()
+            return {**state, "terminated": terminated, "truncated": truncated}
         env = self._primitives.env
         return {
             **self._primitives.measure().state(),
@@ -263,7 +224,7 @@ class RLToolkit(Toolkit):
                 "state": {"step": step, **self._robot_state()},
             },
         )
-        if self.environment == "maniskill":
+        if self.tool_capabilities is not None:
             observation.data["sensors"] = self.tool_capabilities
         observation = self._model_feedback(observation)
         self._count_images(observation)
@@ -432,15 +393,12 @@ class RLToolkit(Toolkit):
     def _save_rollout(self) -> None:
         if self._primitives.frames:
             self._state.save("episode.mp4", self._primitives.frames, step=None, fps=20)
-        contract = {
-            "position_unit": "cm",
-            "coordinate_contract": "episode_coordinates_v2",
-            **self.native_outcome(),
-        }
         self._state.save(
             "rollout.json",
             {
-                **contract,
+                "position_unit": "cm",
+                "coordinate_contract": "episode_coordinates_v2",
+                **self.native_outcome(),
                 "episode_contract_version": EPISODE_CONTRACT_VERSION,
                 "reasoning": self.reasoning,
                 "image_size": self.image_size,

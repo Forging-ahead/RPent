@@ -254,6 +254,7 @@ def test_remote_maniskill_negotiates_native_action_and_camera_tools(connected):
         assert remote.declarations(client) == remote.declarations(connected.toolkit)
         assert client.native_outcome() == connected.toolkit.native_outcome()
         assert client.solved() is None
+        assert "native_outcome" not in connected.worker._outcome()
         capabilities = client.tool_capabilities
         assert ("view_env" in {tool.name for tool in client.list_tools()}) == bool(
             capabilities["rgb_cameras"]
@@ -266,6 +267,21 @@ def test_remote_maniskill_negotiates_native_action_and_camera_tools(connected):
     finally:
         client.close()
     assert connected.bridge.released
+
+
+@pytest.mark.parametrize(
+    "connected", [{"maniskill_camera_mode": "state"}], indirect=True
+)
+def test_remote_preserves_native_steps_after_last_observation(connected):
+    client = connected.connect()
+    try:
+        # A native step advanced, but no high-level observation was committed.
+        connected.toolkit._primitives.step_controllers()
+    finally:
+        client.close()
+    assert client.state.latest_record().extras["episode_return"] == 0
+    assert client.native_outcome()["episode_return"] == 2
+    assert client.native_outcome()["success"] is None
 
 
 def test_remote_preserves_native_tools_observations_and_original_bytes(connected):

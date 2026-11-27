@@ -301,11 +301,7 @@ def build_api_model(
             kwargs["http_client"] = httpx.AsyncClient(
                 transport=transport, timeout=httpx.Timeout(14400.0)
             )
-        provider = provider_cls(**kwargs)
-        if provider_name == "deepseek" and base_url and "base_url" not in params:
-            # This provider exposes the endpoint only on its OpenAI SDK client.
-            provider.client.base_url = base_url
-        return provider
+        return provider_cls(**kwargs)
 
     resolved = _as_qwen_chat_model(
         infer_model(model, provider_factory=_provider_factory)

@@ -72,8 +72,7 @@ class RecordedPerception:
         return self._state.get(step)
 
     def _save(self, name: str, value: Any, step: int) -> None:
-        options = {"compress_level": 1} if name.endswith(".png") else {}
-        if self._state.save(name, value, step=step, **options) is None:
+        if self._state.save(name, value, step=step) is None:
             raise RuntimeError(f"failed to save observation artifact {name}")
 
     def surface_points(self, native_points: np.ndarray) -> np.ndarray:

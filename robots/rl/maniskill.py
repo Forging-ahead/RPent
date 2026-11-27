@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 
@@ -15,8 +16,8 @@ from robots.rl.geometry import opencv_calibration, world_from_depth
 from robots.rl.maniskill_arm import (
     ManiSkillArm,
     UnsupportedRobotPolicy,
-    floating_hand,
     _normalize_target,
+    floating_hand,
     g1_arms,
     transform,
 )
@@ -24,6 +25,56 @@ from robots.rl.maniskill_task_hints import TASK_HINTS
 from robots.rl.perception import RecordedPerception
 from robots.rl.tools import ControlConfig
 from rpent.session import EnvState
+
+
+def tool_profile(toolkit, capabilities):
+    """Select the shared action batch and cameras supported by this robot."""
+    from robots.rl.actions import ActionBatch, DualArmBatch, MobileBatch, ToolTipBatch
+
+    if capabilities.get("mobile"):
+        batch = MobileBatch(toolkit).execute_actions
+        schema = batch.input_schema
+        schema["$defs"]["BaseMove"]["properties"]["vy"].update(
+            minimum=0,
+            maximum=0,
+            description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
+        )
+        batch = replace(batch, _input_schema=schema)
+    elif not capabilities["gripper"]:
+        batch = ToolTipBatch(toolkit).execute_actions
+    else:
+        batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
+        batch = batch_type(toolkit).execute_actions
+    rgb = capabilities["rgb_cameras"]
+    return batch, (
+        rgb,
+        rgb if capabilities["segment"] else (),
+        capabilities["depth_cameras"],
+    )
+
+
+def remote_capabilities(metadata):
+    """Check the server's measured TCP before binding tools to the RPC client."""
+    capabilities = metadata["tool_capabilities"]
+    coords = metadata.get("coordinates") or {}
+    tcp = "native_grasp_tcp" if capabilities["gripper"] else "native_tool_tip"
+    if (
+        coords.get("contract_version") != "episode_coordinates_v2"
+        or coords.get("tcp") != tcp
+    ):
+        raise ValueError(
+            "remote ManiSkill TCP or mounting frame differs from the planner"
+        )
+    return capabilities
+
+
+def recorded_outcome(state):
+    """Read native verdicts and return from the last transferred observation."""
+    extras = state.latest_record().extras
+    return {
+        key: extras[key]
+        for key in ("success", "fail", "episode_return", "terminated", "truncated")
+    }
 
 
 def _json(value):
@@ -238,6 +289,14 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
             self.has_gripper = bool(self.arms) and all(
                 arm.has_gripper for arm in self.arms.values()
             )
+            self.tool_capabilities = {
+                "rgb_cameras": list(self.cameras),
+                "depth_cameras": list(self.depth_cameras),
+                "segment": bool(self.cameras) and self._sam3 is not None,
+                "dual_arm": self.dual_arm,
+                "mobile": self.mobile,
+                "gripper": self.has_gripper,
+            }
             table = getattr(getattr(native, "table_scene", None), "table", None)
             mesh = table.get_first_collision_mesh() if table is not None else None
             self.table_z = None if mesh is None else float(mesh.bounds[1, 2])
@@ -306,6 +365,11 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
             "terminated": self.terminated,
             "truncated": self.truncated,
         }
+
+    def remote_outcome_override(self) -> dict:
+        # A controller may have stepped and failed before recording an observation.
+        live = self.native_outcome()
+        return {} if live == recorded_outcome(self._state) else {"native_outcome": live}
 
     def robot_state(self) -> dict:
         states = {}

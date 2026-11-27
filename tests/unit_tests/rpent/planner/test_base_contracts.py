@@ -24,13 +24,6 @@ from pydantic_ai.models import ModelRequestParameters
 from rpent.planner.base import build_api_model
 
 
-def test_deepseek_custom_endpoint_routes_the_sdk_client(monkeypatch):
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "offline-test-key")
-    endpoint = "http://127.0.0.1:18672/v1"
-    model = build_api_model("deepseek:deepseek-flash", endpoint)
-    assert str(model.client.base_url).rstrip("/") == endpoint
-
-
 @pytest.mark.parametrize("source", ["argument", "environment", "override"])
 @pytest.mark.parametrize("complete_url", [False, True])
 def test_google_endpoint_configuration_preserves_request_url(

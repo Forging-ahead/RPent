@@ -964,10 +964,7 @@ class EnvState:
                     array = np.asarray(value)
                     if array.dtype != np.uint8:
                         array = array.astype(np.uint8)
-                    if suffix == ".png" and "compress_level" in options:
-                        imageio.imwrite(temporary, array, compress_level=options["compress_level"])
-                    else:
-                        imageio.imwrite(temporary, array)
+                    imageio.imwrite(temporary, array)
                 elif suffix == ".npy":
                     np.save(temporary, np.asarray(value))
                 elif suffix == ".npz":
