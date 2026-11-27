@@ -1,3 +1,6 @@
+# From the RPent checkout with the matching RLinf checkout available:
+# uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements/rl-maniskill.txt
+# export PYTHONPATH="/absolute/path/to/RLinf${PYTHONPATH:+:$PYTHONPATH}"
 -e .
 mani_skill==3.0.0b22
 omegaconf

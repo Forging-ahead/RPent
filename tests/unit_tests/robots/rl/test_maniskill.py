@@ -133,7 +133,7 @@ def example_env(camera_mode="state", **options):
         sensors["cam0"]["depth"] = np.full((4, 5, 1), 1000)
         params["cam0"] = {"intrinsic_cv": np.eye(3), "extrinsic_cv": np.eye(4)[:3]}
     return NativeEpisode(
-        {"sensor_data": sensors, "sensor_param": params}, {}, **options
+        {"sensor_data": sensors, "sensor_param": params}, {"success": False}, **options
     )
 
 
@@ -211,7 +211,7 @@ def test_batch_validation_and_native_outcome(make_kit, truncate):
             batch["results"][0]
         )
         expected = {
-            "success": None,
+            "success": False,
             "fail": None,
             "episode_return": 4.0,
             "terminated": not truncate,
@@ -278,7 +278,7 @@ def test_model_retry_uses_declared_robot_action_contract(make_kit):
         response = SimpleNamespace(
             state="complete", finish_reason="tool_call", parts=[call]
         )
-        with pytest.raises(ModelRetry, match="move_to.*set_gripper"):
+        with pytest.raises(ModelRetry, match="this robot's execute_actions schema"):
             asyncio.run(
                 workflow.after_model_request(
                     None, request_context=request, response=response
@@ -296,11 +296,11 @@ def test_model_retry_uses_declared_robot_action_contract(make_kit):
         (False, False, None, "request_limit"),
     ],
 )
-def test_maniskill_outcome_preserves_native_return_without_success(
+def test_scored_outcome_preserves_native_failure_and_return(
     terminated, truncated, fail, reason
 ):
     native = {
-        "success": None,
+        "success": False,
         "fail": fail,
         "episode_return": 2.75,
         "terminated": terminated,
@@ -309,24 +309,23 @@ def test_maniskill_outcome_preserves_native_return_without_success(
     toolkit = SimpleNamespace(
         environment="maniskill",
         native_outcome=lambda: native,
-        state=SimpleNamespace(records=lambda: []),
+        solved=lambda: False,
+        state=SimpleNamespace(
+            records=lambda: [],
+            latest_record=lambda: SimpleNamespace(truncated=truncated),
+        ),
     )
     result = SimpleNamespace(stats={"turns_used": 4}, error=None, error_kind=None)
     outcome = rl_episode.episode_outcome(result, toolkit, max_turns=4)
-    assert outcome == {
-        **native,
-        "terminal": True,
-        "termination_reason": reason,
-        "error": None,
-        "error_kind": None,
-    }
+    assert outcome["terminal"] and outcome["termination_reason"] == reason
+    assert native.items() <= outcome.items()
     toolkit.infrastructure_error = "RPC disconnected"
     failed = rl_episode.episode_outcome(result, toolkit, max_turns=4)
     assert (
         failed["termination_reason"] == "infrastructure_error"
         and not failed["terminal"]
     )
-    assert {key: failed[key] for key in native} == native
+    assert native.items() <= failed.items()
 
 
 @pytest.mark.parametrize("name", ["MS-AntRun-v1", "pick_cube"])
@@ -417,8 +416,8 @@ def connected(tmp_path, monkeypatch, request, make_kit):
 def test_remote_maniskill_negotiates_native_action_and_camera_tools(connected):
     client, kit, worker = connected
     assert remote.declarations(client) == remote.declarations(kit)
-    assert client.native_outcome() == kit.native_outcome() and client.solved() is None
-    assert "native_outcome" not in worker._outcome()
+    assert client.native_outcome() == kit.native_outcome() and client.solved() is False
+    assert worker._outcome()["native_outcome"] == kit.native_outcome()
     assert ("view_env" in {tool.name for tool in client.list_tools()}) == bool(
         client.tool_capabilities["rgb_cameras"]
     )
@@ -435,7 +434,7 @@ def test_remote_preserves_native_steps_after_last_observation(connected):
     client.close()
     assert client.state.latest_record().extras["episode_return"] == 0
     assert client.native_outcome()["episode_return"] == 2
-    assert client.native_outcome()["success"] is None
+    assert client.native_outcome()["success"] is False
 
 
 # Native tests import simulator dependencies only when explicitly enabled.
@@ -467,7 +466,14 @@ def open_episode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "env_id", ["MS-CartpoleBalance-v1", "AnymalC-Reach-v1", "RotateValveLevel0-v1"]
+    "env_id",
+    [
+        "MS-CartpoleBalance-v1",
+        "AnymalC-Reach-v1",
+        "RotateValveLevel0-v1",
+        "TableTopFreeDraw-v1",
+        "SceneManipulation-v1",
+    ],
 )
 def test_excluded_tasks_rejected_before_simulation(env_id, open_episode):
     with pytest.raises(ValueError, match="Unsupported ManiSkill pose task"):
@@ -515,7 +521,7 @@ def test_native_episode_caps_coordinates_and_horizon(env_id, open_episode, monke
     assert result["executed_count"] == 1
     metrics = kit.native_outcome()
     assert metrics["terminated"] or metrics["truncated"]
-    assert metrics["success"] is None or type(metrics["success"]) is bool
+    assert type(metrics["success"]) is bool
     record = kit.state.latest_record().extras
     assert record["env_steps"] == 1 and math.isfinite(metrics["episode_return"])
     assert record["episode_return"] == pytest.approx(record["reward"])

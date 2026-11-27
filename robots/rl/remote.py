@@ -192,11 +192,14 @@ class ToolkitWorker(RpcFacade):
         return self._pack(self._initial)
 
     def _outcome(self) -> dict[str, Any]:
-        override = getattr(self.toolkit._primitives, "remote_outcome_override", None)
         return {
             "solved": self.toolkit.solved(),
             "completion_result": self.toolkit.completion_result(),
-            **(override() if override else {}),
+            **(
+                {"native_outcome": self.toolkit.native_outcome()}
+                if self.toolkit.environment == "maniskill"
+                else {}
+            ),
             "infrastructure_error": getattr(self.toolkit, "infrastructure_error", None),
         }
 
@@ -500,7 +503,7 @@ class RemoteToolkit(Toolkit):
         """Return the most recent native metrics from the simulator worker."""
         return self._native_outcome
 
-    def solved(self) -> bool | None:
+    def solved(self) -> bool:
         return self._solved
 
     def _renew(self) -> None:

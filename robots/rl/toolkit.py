@@ -181,7 +181,11 @@ class RLToolkit(Toolkit):
     def _robot_state(self) -> dict[str, Any]:
         if self.environment == "maniskill":
             native = self._primitives
-            return {**native.robot_state(), "terminated": native.terminated, "truncated": native.truncated}
+            return {
+                **native.robot_state(),
+                "terminated": native.terminated,
+                "truncated": native.truncated,
+            }
         if self.environment != "libero":
             return {
                 **self._primitives.robot_state(),
@@ -271,7 +275,7 @@ class RLToolkit(Toolkit):
         except (ValueError, TypeError) as exc:
             from robots.rl.contracts import argument_hint
 
-            hint = argument_hint(name, self.environment, declaration)
+            hint = argument_hint(name, self.environment)
             return ToolResult(
                 data={"error": str(exc)},
                 model_text=f"Invalid {name} arguments: {exc}. {hint} No tool executed; correct the arguments and try again.",
@@ -359,7 +363,7 @@ class RLToolkit(Toolkit):
             self._recorded_env_steps = self._primitives.env_steps
         return ToolResult(data=data)
 
-    def solved(self) -> bool | None:
+    def solved(self) -> bool:
         """Return the environment's latched success flag."""
         if self.environment != "libero":
             return self._primitives.native_success()

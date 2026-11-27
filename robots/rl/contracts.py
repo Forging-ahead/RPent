@@ -220,12 +220,10 @@ def validate_episode_options(environment: str, values: dict) -> dict:
     return options
 
 
-def argument_hint(
-    name: str, environment: str = "libero", declaration: Tool | None = None
-) -> str:
+def argument_hint(name: str, environment: str = "libero") -> str:
     """Short actionable model feedback, independently of validator formatting."""
-    if environment == "maniskill" and name == "execute_actions" and declaration is not None:
-        return declaration.description
+    if environment == "maniskill" and name == "execute_actions":
+        return "Use the action types and required fields in this robot's execute_actions schema."
     if environment == "robotwin" and name in {"move_to", "set_gripper"}:
         return "Follow the declared native action fields and orientation convention; include the selected arm where required."
     if environment == "robocasa" and name in {"move_to", "set_gripper"}:

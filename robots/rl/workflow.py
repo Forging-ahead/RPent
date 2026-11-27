@@ -99,9 +99,7 @@ class WorkflowCapability(AbstractCapability):
                 validate_relations(call.tool_name, arguments)
             except (AssertionError, ValueError, TypeError) as exc:
                 self.stats["invalid_tool_responses"] += 1
-                hint = argument_hint(
-                    call.tool_name, self.toolkit.environment, self.allowed[call.tool_name]
-                )
+                hint = argument_hint(call.tool_name, self.toolkit.environment)
                 raise _InvalidToolArguments(
                     f"Invalid tool arguments: {exc}. {hint} No tool executed."
                 ) from exc

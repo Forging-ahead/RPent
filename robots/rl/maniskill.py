@@ -89,6 +89,23 @@ def recorded_outcome(state):
     }
 
 
+def scored_outcome(outcome: dict, native: dict) -> dict:
+    """Keep live simulator metrics, including steps after the last observation."""
+    outcome = {**outcome, **native}
+    if (
+        outcome["termination_reason"] != "infrastructure_error"
+        and not native["success"]
+    ):
+        if native["terminated"]:
+            outcome["termination_reason"] = (
+                "environment_failure" if native["fail"] else "environment_terminated"
+            )
+            outcome["terminal"] = True
+        elif native["truncated"]:
+            outcome.update(termination_reason="environment_step_limit", terminal=True)
+    return outcome
+
+
 def _task_hint(env_id):
     instructions = (
         Path(__file__).with_name("prompts") / "maniskill_tasks.md"
@@ -357,30 +374,22 @@ class ManiSkillPrimitives(RecordedPerception):
     def ended(self) -> bool:
         return self.terminated or self.truncated
 
-    def _verdict(self, name: str) -> bool | None:
-        metrics = self._info.get("episode", {})
-        value = metrics.get(f"{name}_once", self._info.get(name))
-        return None if value is None else bool(value)
-
-    def native_success(self) -> bool | None:
-        return self._verdict("success")
-
-    def native_fail(self) -> bool | None:
-        return self._verdict("fail")
+    def native_success(self) -> bool:
+        episode = self._info.get("episode", {})
+        success = episode.get("success_once", self._info.get("success"))
+        if success is None:
+            raise ValueError(f"{self.env_id} did not report its native success flag")
+        return bool(success)
 
     def native_outcome(self) -> dict:
+        fail = self._info.get("episode", {}).get("fail_once", self._info.get("fail"))
         return {
             "success": self.native_success(),
-            "fail": self.native_fail(),
+            "fail": None if fail is None else bool(fail),
             "episode_return": self.episode_return,
             "terminated": self.terminated,
             "truncated": self.truncated,
         }
-
-    def remote_outcome_override(self) -> dict:
-        # A controller may have stepped and failed before recording an observation.
-        live = self.native_outcome()
-        return {} if live == recorded_outcome(self._state) else {"native_outcome": live}
 
     def robot_state(self) -> dict:
         states = {}
