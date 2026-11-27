@@ -224,7 +224,7 @@ def argument_hint(
     name: str, environment: str = "libero", declaration: Tool | None = None
 ) -> str:
     """Short actionable model feedback, independently of validator formatting."""
-    if name == "execute_actions" and declaration is not None:
+    if environment == "maniskill" and name == "execute_actions" and declaration is not None:
         return declaration.description
     if environment == "robotwin" and name in {"move_to", "set_gripper"}:
         return "Follow the declared native action fields and orientation convention; include the selected arm where required."

@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -320,6 +318,9 @@ def test_sam_audit_preserves_exact_mask_score_threshold_and_service_error(tmp_pa
 def test_empty_qwen_tool_has_bounded_native_grammar_and_same_contract(
     tmp_path, model_name, enabled
 ):
+    import asyncio
+    from types import SimpleNamespace
+
     from pydantic_ai.models import ModelRequestParameters
     from pydantic_ai.tools import ToolDefinition
 
@@ -383,26 +384,3 @@ def test_general_fractional_grammar_keeps_zero_expressible_and_declared_limits()
     assert generated["properties"]["yaw_rate"] == {"type": "number"}
     assert generated["properties"]["vx"] == original["properties"]["vx"]
     assert generated["required"] == original["required"]
-
-
-def test_model_retry_uses_declared_robot_action_contract():
-    import time
-
-    from pydantic_ai import ModelRetry, ToolCallPart
-
-    from robots.rl.toolkit import episode_tools
-    from robots.rl.workflow import WorkflowCapability
-
-    caps = dict(rgb_cameras=[], depth_cameras=[], segment=False, dual_arm=False, gripper=True)
-    workflow = WorkflowCapability(SimpleNamespace(
-        environment="maniskill", tool_capabilities=caps, max_actions_per_call=2,
-        reasoning=False, workflow_stats={},
-        list_tools=lambda: episode_tools(None, "maniskill", 2, capabilities=caps),
-    ))
-    workflow.request_started = time.perf_counter()
-    request = SimpleNamespace(model=SimpleNamespace())
-    call = ToolCallPart("execute_actions", {"actions": [{"action": "invalid"}]})
-    response = SimpleNamespace(state="complete", finish_reason="tool_call", parts=[call])
-    with pytest.raises(ModelRetry, match="move_to.*set_gripper"):
-        asyncio.run(workflow.after_model_request(None, request_context=request, response=response))
-    assert workflow.stats["invalid_tool_responses"] == 1

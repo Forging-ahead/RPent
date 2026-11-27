@@ -8,7 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from robots.rl.coordinates import grasp_axes
-from robots.rl.tools import CartesianServo, Measurement
+from robots.rl.tools import LiberoRLPrimitives, Measurement, _clip_norm
 
 
 def transform(pose):
@@ -29,7 +29,7 @@ class UnsupportedRobotPolicy(ValueError):
     """The registered robot lacks a public RPent action for this embodiment."""
 
 
-class ManiSkillArm(CartesianServo):
+class ManiSkillArm(LiberoRLPrimitives):
     def __init__(self, episode, agent):
         self.episode = episode
         self.agent = agent
@@ -212,6 +212,19 @@ class ManiSkillArm(CartesianServo):
         return np.r_[
             relative[:3, 3], Rotation.from_matrix(relative[:3, :3]).as_euler("XYZ")
         ]
+
+    def _bounded_pose_step(
+        self, current: Measurement, xyz: np.ndarray, rotation: np.ndarray
+    ):
+        """World-frame translation and rotation increments, plus unclipped errors."""
+        position = xyz - current.xyz
+        angle = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
+        return (
+            _clip_norm(position, self._config.position_step_m),
+            _clip_norm(angle, self._config.rotation_step_rad),
+            float(np.linalg.norm(position)),
+            float(np.linalg.norm(angle)),
+        )
 
     def _pose_action(self, current, xyz, rotation):
         position, rotation_step, distance, angle = self._bounded_pose_step(

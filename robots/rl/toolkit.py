@@ -179,10 +179,16 @@ class RLToolkit(Toolkit):
         """Register no file tools; rollouts observe only through robot tools."""
 
     def _robot_state(self) -> dict[str, Any]:
+        if self.environment == "maniskill":
+            native = self._primitives
+            return {**native.robot_state(), "terminated": native.terminated, "truncated": native.truncated}
         if self.environment != "libero":
-            state = self._primitives.robot_state()
-            terminated, truncated, _ = self._primitives._record_status()
-            return {**state, "terminated": terminated, "truncated": truncated}
+            return {
+                **self._primitives.robot_state(),
+                "terminated": self._primitives.native_success(),
+                "truncated": self._primitives.env_steps
+                >= self._primitives._max_episode_steps,
+            }
         env = self._primitives.env
         return {
             **self._primitives.measure().state(),

@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import io
-import itertools
 from typing import Annotated, Any
 
 import numpy as np
@@ -39,41 +38,6 @@ class RecordedPerception:
 
     cameras: tuple[str, ...]
     display_size: int | None = None
-
-    def _init_perception(self, state, sam3_client) -> None:
-        self._state = state
-        self._sam3 = sam3_client
-        self._masks: dict[str, tuple[int, str, np.ndarray]] = {}
-        self._mask_ids = itertools.count(1)
-        self._sam_calls = itertools.count(1)
-
-    def _coordinates_metadata(self):
-        return self.coordinates.metadata()
-
-    def record_observation(
-        self, *, command=None, result=None, elapsed_s=None
-    ) -> StepRecord:
-        """Store one measured state and its camera artifacts in the same step."""
-        state = self.robot_state()
-        terminated, truncated, extras = self._record_status()
-        with self._state.record_step(
-            state=state,
-            terminated=terminated,
-            truncated=truncated,
-            extras=extras,
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-        ) as step:
-            if hasattr(self, "coordinates"):
-                self._save("step_coordinates.json", self._coordinates_metadata(), step)
-            for camera in self.cameras:
-                self._record_camera(camera, step, state)
-        return self._state.get(step)
-
-    def _save(self, name: str, value: Any, step: int) -> None:
-        if self._state.save(name, value, step=step) is None:
-            raise RuntimeError(f"failed to save observation artifact {name}")
 
     def surface_points(self, native_points: np.ndarray) -> np.ndarray:
         """Filter invalid native depth, then convert before statistics or z filters."""

@@ -203,15 +203,6 @@ class ActionBatch:
         )
 
 
-class ToolTipBatch(ActionBatch):
-    @tool
-    def execute_actions(
-        self, actions: Annotated[list[MoveAction], Field(min_length=1)]
-    ) -> ToolResult:
-        """Execute 1..K move_to items for the tool tip. Each item is measured before continuing."""
-        return self._execute_actions(actions)
-
-
 class DualArmBatch(ActionBatch):
     @tool
     def execute_actions(

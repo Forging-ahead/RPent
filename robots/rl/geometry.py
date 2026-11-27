@@ -47,19 +47,6 @@ def metric_depth(depth: np.ndarray, camera_meta: dict[str, Any]) -> np.ndarray:
     return near / (1.0 - buffer * (1.0 - near / far))
 
 
-def opencv_calibration(intrinsic: np.ndarray, extrinsic: np.ndarray) -> dict[str, Any]:
-    """Convert OpenCV world-to-camera parameters to the recorded camera convention."""
-    extrinsic = np.asarray(extrinsic, dtype=float)
-    if extrinsic.shape == (3, 4):
-        extrinsic = np.vstack((extrinsic, [0, 0, 0, 1]))
-    elif extrinsic.shape != (4, 4):
-        raise ValueError("camera extrinsic must be a 3x4 or 4x4 transform")
-    return {
-        "intrinsic_K": np.asarray(intrinsic).tolist(),
-        "extrinsic_cam2world": np.linalg.inv(extrinsic).tolist(),
-    }
-
-
 def world_from_depth(depth_m: np.ndarray, camera_meta: dict[str, Any]) -> np.ndarray:
     """Back-project a metric depth image to world-frame points."""
     intrinsic = np.asarray(camera_meta["intrinsic_K"], dtype=np.float64)

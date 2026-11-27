@@ -41,9 +41,7 @@ from tests.unit_tests.robots.rl.test_libero_rl_contracts import (
 )
 
 
-@pytest.mark.parametrize(
-    "environment", ["libero", "robotwin", "robocasa", "robodojo", "maniskill"]
-)
+@pytest.mark.parametrize("environment", ["libero", "robotwin", "robocasa", "robodojo"])
 def test_episode_runtime_request_is_accepted_by_its_remote_manager(
     tmp_path, environment
 ):
@@ -55,10 +53,7 @@ def test_episode_runtime_request_is_accepted_by_its_remote_manager(
     task_args = (
         ["--suite", "libero_object", "--task", "9", "--libero-type", "pro"]
         if environment == "libero"
-        else [
-            "--task-name",
-            "MS-AntRun-v1" if environment == "maniskill" else "native_task",
-        ]
+        else ["--task-name", "native_task"]
     )
     args = parser.parse_args(
         [
@@ -80,42 +75,6 @@ def test_episode_runtime_request_is_accepted_by_its_remote_manager(
     request = runtime["remote_request"]
     validate_request(request, {0})
     assert ("layout" in request["task"]) == (environment == "robodojo")
-
-
-@pytest.mark.parametrize("name", ["MS-AntRun-v1", "pick_cube"])
-def test_local_maniskill_config_preserves_task_seed_and_native_step_budget(
-    tmp_path, name
-):
-    from robots.rl.robot_spec import get_robot_spec
-
-    parser = argparse.ArgumentParser()
-    spec = get_robot_spec()
-    spec.add_cli_args(parser, False)
-    args = parser.parse_args([
-        "--simulator", "maniskill", "--task-name", name, "--seed", "19",
-        "--max-episode-steps", "12", "--image_size", "256",
-    ])
-    args.output_dir = tmp_path
-    daemons, kwargs = spec.init_runtime(
-        args, tmp_path, NullDashboardEventSink(), {"env", "sam3"}
-    )
-    assert daemons == []
-    assert kwargs == {
-        "task_name": name,
-        "seed": 19,
-        "render_device": args.cuda_device,
-        "sam3_client": None,
-    }
-
-
-def test_maniskill_remote_request_rejects_non_native_or_path_identifiers():
-    request = _owned_request()
-    request["task"] = {"environment": "maniskill", "seed": 0}
-    for name in ("../PickCube-v1", "NotVersioned", "a/b-v1", ""):
-        with pytest.raises(ValueError, match="invalid native task identifier"):
-            validate_request(
-                {**request, "task": {**request["task"], "task_name": name}}, {0}
-            )
 
 
 class Bridge(RpcFacade):
@@ -184,29 +143,23 @@ def connected(tmp_path, monkeypatch, request):
         templates, "default_variables", lambda: {"output_dir": "/offline/output"}
     )
     options = dict(getattr(request, "param", {}))
-    if camera_mode := options.pop("maniskill_camera_mode", None):
-        from tests.unit_tests.robots.rl.test_maniskill_toolkit import (
-            example_env,
-            maniskill_toolkit,
-        )
+    if options.get("calibrated", False):
+        from tests.unit_tests.robots.rl.test_coordinates import CalibratedEnv
 
-        env = example_env(camera_mode)
-        task = {"environment": "maniskill", "task_name": "Example-v1", "seed": 1}
-        toolkit = maniskill_toolkit(
-            tmp_path / "backend/run", monkeypatch, env, seed=1, **options
-        )
+        env = CalibratedEnv([1, -2, 0.5], 0.4, success_below_z=1.45)
     else:
-        if options.pop("calibrated", False):
-            from tests.unit_tests.robots.rl.test_coordinates import CalibratedEnv
-
-            env = CalibratedEnv([1, -2, 0.5], 0.4, success_below_z=1.45)
-        else:
-            env = FakeEnv(success_below_z=0.95)
-        toolkit = make_toolkit(tmp_path / "backend", "adaptive", env=env, **options)
-        task = {"environment": "libero", "suite": "libero_object", "task": 0, "seed": 1}
+        env = FakeEnv(success_below_z=0.95)
+    options.pop("calibrated", None)
+    toolkit = make_toolkit(tmp_path / "backend", "adaptive", env=env, **options)
     release = contextlib.ExitStack()
     release.callback(toolkit.close)
-    task.update(options)
+    task = {
+        "environment": "libero",
+        "suite": "libero_object",
+        "task": 0,
+        "seed": 1,
+        **options,
+    }
     request = {"task": task, "gpu": 0, "max_episode_steps": 10000}
     config = {**request, "output_dir": str(tmp_path / "backend/run")}
     worker = remote.ToolkitWorker(toolkit, release, config)
@@ -241,47 +194,6 @@ def connected(tmp_path, monkeypatch, request):
         server.server_close()
         thread.join(timeout=3)
         assert not thread.is_alive()
-
-
-@pytest.mark.parametrize(
-    "connected",
-    [{"maniskill_camera_mode": "rgbd"}, {"maniskill_camera_mode": "state"}],
-    indirect=True,
-)
-def test_remote_maniskill_negotiates_native_action_and_camera_tools(connected):
-    client = connected.connect()
-    try:
-        assert remote.declarations(client) == remote.declarations(connected.toolkit)
-        assert client.native_outcome() == connected.toolkit.native_outcome()
-        assert client.solved() is None
-        assert "native_outcome" not in connected.worker._outcome()
-        capabilities = client.tool_capabilities
-        assert ("view_env" in {tool.name for tool in client.list_tools()}) == bool(
-            capabilities["rgb_cameras"]
-        )
-        action = {"action": "move_to", "xyz": [10, 0, 30]}
-        result = client.execute_tool("execute_actions", {"actions": [action]})
-        assert not result.is_error
-        assert client.native_outcome() == connected.toolkit.native_outcome()
-        assert client.native_outcome()["episode_return"] == 4.0
-    finally:
-        client.close()
-    assert connected.bridge.released
-
-
-@pytest.mark.parametrize(
-    "connected", [{"maniskill_camera_mode": "state"}], indirect=True
-)
-def test_remote_preserves_native_steps_after_last_observation(connected):
-    client = connected.connect()
-    try:
-        # A native step advanced, but no high-level observation was committed.
-        connected.toolkit._primitives.step_controllers()
-    finally:
-        client.close()
-    assert client.state.latest_record().extras["episode_return"] == 0
-    assert client.native_outcome()["episode_return"] == 2
-    assert client.native_outcome()["success"] is None
 
 
 def test_remote_preserves_native_tools_observations_and_original_bytes(connected):

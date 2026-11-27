@@ -5,14 +5,19 @@
 from __future__ import annotations
 
 import inspect
+import itertools
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
+from typing import Annotated
 
 import numpy as np
+from pydantic import Field
 
-from robots.rl.backends import MeasuredMobileMotion
+from robots.rl.actions import ActionBatch, DualArmBatch, MobileBatch, MoveAction
+from robots.rl.backends import RoboCasaGeneralPrimitives
 from robots.rl.coordinates import Coordinates, dual_arm_mount, horizontal_rotation
-from robots.rl.geometry import opencv_calibration, world_from_depth
+from robots.rl.geometry import world_from_depth
 from robots.rl.maniskill_arm import (
     ManiSkillArm,
     UnsupportedRobotPolicy,
@@ -21,16 +26,23 @@ from robots.rl.maniskill_arm import (
     g1_arms,
     transform,
 )
-from robots.rl.maniskill_task_hints import TASK_HINTS
 from robots.rl.perception import RecordedPerception
-from robots.rl.tools import ControlConfig
+from robots.rl.tools import ControlConfig, LiberoRLPrimitives
 from rpent.session import EnvState
+from rpent.tools import ToolResult, tool
+
+
+class ToolTipBatch(ActionBatch):
+    @tool
+    def execute_actions(
+        self, actions: Annotated[list[MoveAction], Field(min_length=1)]
+    ) -> ToolResult:
+        """Execute 1..K move_to items for the tool tip. Each item is measured before continuing."""
+        return self._execute_actions(actions)
 
 
 def tool_profile(toolkit, capabilities):
     """Select the shared action batch and cameras supported by this robot."""
-    from robots.rl.actions import ActionBatch, DualArmBatch, MobileBatch, ToolTipBatch
-
     if capabilities.get("mobile"):
         batch = MobileBatch(toolkit).execute_actions
         schema = batch.input_schema
@@ -75,6 +87,14 @@ def recorded_outcome(state):
         key: extras[key]
         for key in ("success", "fail", "episode_return", "terminated", "truncated")
     }
+
+
+def _task_hint(env_id):
+    instructions = (
+        Path(__file__).with_name("prompts") / "maniskill_tasks.md"
+    ).read_text(encoding="utf-8")
+    section = instructions.partition(f"\n## {env_id}\n")[2].partition("\n## ")[0]
+    return " ".join(section.split())
 
 
 def _json(value):
@@ -192,8 +212,16 @@ def _make_env(
     return env, env_id
 
 
-class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
+class ManiSkillPrimitives(RecordedPerception):
     """Expose native policy observations, controller actions and episode metrics."""
+
+    # Fetch uses the existing base/lift loops with its own measured state and native step.
+    BASE_LIMITS = RoboCasaGeneralPrimitives.BASE_LIMITS
+    move_base = RoboCasaGeneralPrimitives.move_base
+    move_lift = RoboCasaGeneralPrimitives.move_lift
+    _mobility_delta = RoboCasaGeneralPrimitives._mobility_delta
+    _mobility_feedback = RoboCasaGeneralPrimitives._mobility_feedback
+    _save = LiberoRLPrimitives._save
 
     def __init__(
         self,
@@ -206,7 +234,11 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         render_device: int | None = None,
         max_episode_steps: int | None = None,
     ) -> None:
-        self._init_perception(state, sam3_client)
+        self._state = state
+        self._sam3 = sam3_client
+        self._masks = {}
+        self._mask_ids = itertools.count(1)
+        self._sam_calls = itertools.count(1)
         self._check_cancelled = check_cancelled
         self._config = ControlConfig()
         self.frames = []
@@ -311,32 +343,11 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                 self.task = (
                     f"{self.env_id}: {description}" if description else self.env_id
                 )
-            if self.env_id == "PickCube-v1":
-                self.task += (
-                    " The wrist starts pointing down. Omit orientation_rpy from "
-                    "move_to to keep that orientation. Use the segmented cube's x and y. "
-                    "For the grasp height, add half of cube_size_cm to "
-                    "table_height_above_base_cm. "
-                    "The initial wrist pose is already a clear hover. Move directly "
-                    "to the grasp position, then close. Once is_grasped is true, "
-                    "carry the cube centre directly to goal.xyz and hold it still "
-                    "with the gripper closed."
-                )
-            elif self.env_id == "StackCube-v1":
-                self.task += (
-                    " The wrist starts pointing down in a clear hover. "
-                    "Keep that orientation and move directly to the red cube centre, "
-                    "half its height above the table. Close, then plan a single carry "
-                    "that clears the green cube before the cubes overlap. Align the "
-                    "red cube centre over the green top, accounting for any offset "
-                    "from the gripper, and open immediately with time left for settling. "
-                    "For gaps over 15 cm, budget release before carrying. On a clear path, "
-                    "batch one diagonal move_to to the release pose followed by set_gripper "
-                    "with opening 1. The diagonal itself raises the cube during transfer. "
-                    f"The full sequence has {self.env.cfg.init_params.max_episode_steps} "
-                    "environment steps."
-                )
-            if hint := TASK_HINTS.get(self.env_id):
+            if hint := _task_hint(self.env_id):
+                if "{max_episode_steps}" in hint:
+                    hint = hint.format(
+                        max_episode_steps=self.env.cfg.init_params.max_episode_steps
+                    )
                 self.task += " " + hint
         except BaseException:
             self.env.close()
@@ -466,28 +477,42 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         if self.cameras:
             self.frames.append(self._obs["sensor_data"][self.cameras[0]]["rgb"].copy())
 
-    def _record_status(self):
+    def record_observation(self, *, command=None, result=None, elapsed_s=None):
         if self.env_steps == 0 and not self.frames:
             self._record_video_frame()
-        return (
-            self.terminated,
-            self.truncated,
-            {
+        with self._state.record_step(
+            state=self.robot_state(),
+            terminated=self.terminated,
+            truncated=self.truncated,
+            command=command,
+            result=result,
+            elapsed_s=elapsed_s,
+            extras={
                 **self.native_outcome(),
                 "env_steps": self.env_steps,
                 "reward": self.reward,
                 "episode": _json(self._info.get("episode", {})),
             },
-        )
+        ) as step:
+            self._save("step_coordinates.json", self.coordinates.metadata(), step)
+            for camera in self.cameras:
+                self._record_camera(camera, step)
+        return self._state.get(step)
 
-    def _record_camera(self, camera, step, state):
+    def _record_camera(self, camera, step):
         data = self._obs["sensor_data"][camera]
         self._save(f"{camera}.png", data["rgb"], step)
         if camera in self.depth_cameras:
             params = self._obs["sensor_param"][camera]
-            calibration = opencv_calibration(
-                params["intrinsic_cv"], params["extrinsic_cv"]
-            )
+            extrinsic = np.asarray(params["extrinsic_cv"], dtype=float)
+            if extrinsic.shape == (3, 4):
+                extrinsic = np.vstack((extrinsic, [0, 0, 0, 1]))
+            elif extrinsic.shape != (4, 4):
+                raise ValueError("camera extrinsic must be a 3x4 or 4x4 transform")
+            calibration = {
+                "intrinsic_K": np.asarray(params["intrinsic_cv"]).tolist(),
+                "extrinsic_cam2world": np.linalg.inv(extrinsic).tolist(),
+            }
             # ManiSkill reports axial depth in millimetres, zero marks missing pixels.
             depth = np.asarray(data["depth"], dtype=np.float32) / 1000
             if depth.ndim == 3:
