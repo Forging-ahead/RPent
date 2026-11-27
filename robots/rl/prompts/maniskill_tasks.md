@@ -95,11 +95,11 @@ at the goal.
 
 ## PlaceSphere-v1
 
-Grasp straight down at the sphere's equator with the measured wrist. Once the fingers close, carry diagonally to
-the bin center, accounting for the sphere-to-TCP offset. Set the height so the sphere's underside meets the
-support before release. Batch this single carry and set_gripper(opening=1); reserve the last ten of 50 steps for
-release and settling. If the ball is in the bin and the episode continues, repeat the open-gripper target at the
-same wrist pose to let it settle.
+From the initial base view, segment sphere and bin. Back-project the sphere mask's top 1 cm (z_range_cm); its XY
+is the grasp XY. Use exactly that XY. The equator is halfway between table height and sphere top. From the clear
+start batch move_to(equator) and close fully. After contact, batch one diagonal carry to the bin mask's XY at
+bin rim top + sphere radius + 0.3 cm and open fully. If the ball is in the bin and the episode continues, hold
+the wrist still with the open-gripper target.
 
 ## PlugCharger-v1
 
@@ -114,11 +114,11 @@ views.
 
 ## PokeCube-v1
 
-Grip the peg with its far end exposed. Use the measured tip-to-TCP offset to align just behind the cube on the
-line to the bullseye. Keep the post-grasp height and wrist angle. Push into the near half of the circle, leaving
-several of the 50 steps for braking. Batch the final push and set_gripper(opening=0) to hold the wrist still. If
-the cube is inside and the episode continues, repeat the stationary grip command. A camera view or final reply
-advances no physics.
+Use the base view to measure peg, cube and target. Approach the middle of the peg shaft at its measured XY,
+about 4 cm above its top. Descend at the same XY to the shaft center height and close, leaving the far tip
+exposed. Budget 25 of the 50 steps for this grasp. With that grip and measured wrist height, align the TIP just
+behind the cube on the cube-to-target line, then push the cube inside the circle using the tip-to-TCP offset.
+Hold the wrist still with set_gripper(0) while the episode continues.
 
 ## PullCube-v1
 
@@ -188,21 +188,20 @@ to give it simulation time.
 
 ## SO100GraspCube-v1
 
-Save the initial TCP pose and pre-close to 0.25. For pixel (col,row), U=2*col/W-1, V=2*row/H-1,
-t=33.7/(0.570+0.401*V). Table XY in cm is F=[30+t*(-0.684+0.271*U+0.231*V), -50+t*(0.456+0.406*U-0.154*V)].
-Approach with the measured wrist. Center the gap by adding F(cube)-F(gap) to measured XY, descend to 1.4–1.6 cm,
-and close to 0.12. Next lift toward the saved initial pose with that grip, including after a partial close.
-Continue to the saved pose when the cube rises with the fingers. Reopen for a retry only if the lift visibly
-leaves the cube on the table.
+Save the start pose. Segment the red cube in the 512px base view; its box is [r0,c0,r1,c1]. Let r=(r0+r1)/2-256,
+c=(c0+c1)/2-256, d=1+0.00275*r. Table XY in cm is F=[(-10.44+0.0626*c+0.1358*r)/d,(-23.04+0.0938*c-0.173*r)/d].
+Batch opening 0.25 and move_to([F.x,F.y,9.5]). Descend toward the cube at that XY; if the visible finger gap is
+off center, add F(cube)-F(gap) to the measured XY. At 1.4–1.6 cm close to 0.12. Lift back to the saved start
+with this grip; check whether the cube rises before considering reopening.
 
 ## StackCube-v1
 
-Use the initial hover and omit orientation_rpy. Go straight to red's center at half its height plus 0.1 cm and
-close. You have {max_episode_steps} steps. On a clear path, the next move goes diagonally from the grasp to the
-release pose over green. A separate vertical lift consumes the release budget. Account for the grasp offset. Aim
-inside green's top toward red by up to 1 cm in x and 1.5 cm in y; set red's center at green's top plus half the
-red height and 1.5 cm clearance. Batch this one move_to and set_gripper(opening=1). Reach release height with at
-least two steps left.
+Plan two batches from the initial red and green segment receipts. Batch 1: move to red's reported XY at table
+height + half the red height + 0.1 cm, then close fully. A blocked close with a finger gap is the cue to start
+batch 2. Batch 2: one diagonal move_to over green, then full opening. This diagonal is the grasp-check lift AND
+the carry; verify the lift at the destination. Aim inside green's top toward red by up to 1 cm in x and 1.5 cm
+in y. Target green top + half red height + 1.5 cm in z. Keep the measured wrist. Reserve the final two of
+{max_episode_steps} steps for release.
 
 ## StackGreenCubeOnYellowCubeBakedTexInScene-v1
 
