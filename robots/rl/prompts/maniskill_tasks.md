@@ -18,42 +18,38 @@ at canvas height.
 
 ## FMBAssembly1Easy-v1
 
-Start by uncovering the loose GREEN bridge: shift the hand one palm-width away from the loose parts while
-keeping it high, xyz only. Preserve that measured wrist through the first grasp and lift; rotate only when
-carrying the green bridge. In the clear base-camera view find two green feet joined by a green rail.
-Back-project pixels INSIDE the green rail; check the planned grasp lies on that same green strip, away from the
-isolated black plate and red fixture. Grip the narrow solid rail midway between feet, from above, about 1.5 cm
-below its top. Lift, checking green feet move, turn the bridge upright, set feet on clear nearby table, and
-regrasp the top rail from above. Align the feet over the two mounting slots around the yellow peg, lower and
-release.
+Open the base view by shifting the raised hand aside once. Identify the green bridge in the clear frame. Use
+the narrow rail's two ends and its midpoint, not the median of feet and rail together. Set the jaw closing
+line across that rail during the diagonal approach. Descend between the feet; at a stalled descent with the
+pads straddling green, close there and lift. If it stays on the table, use the clear frame to move one pad
+width along the rail and turn crosswise before retrying. Stand the carried bridge on its feet, regrasp from
+above, fit the two feet into the slots around the yellow peg and open.
 
 ## InsertFlower-v1
 
-Pinch the thicker neck where the white bloom meets the stem. Back-project the neck, its height and a clear patch
-on its side. Set the required pinch wrist RPY [-1.67,-0.05,-1.57] during the approach to the clear side patch,
-then retain it. At opening 0.50, keep the thumb/index gap OPEN until the neck is between the pads. At closure
-the pinch center is roughly palm+[10.3,2.8,-6.2] cm. Lower beside the neck on bare table first, keeping
-clearance under the pads; slide in horizontally at neck height, then close once to 0.32. If contact moves the
-flower, remeasure its new neck before gripping. Watch the flower move with the first carry. Rotate stem-end down
-over the mouth, insert and release.
+Locate the white bloom, adjacent narrow stem and vase in a clear frame. Use a thumb–index side pinch just
+below the bloom. Orient the open hand at [-1.67,-0.05,-1.57] over bare table. Estimate palm XYZ as neck
+minus [10.3,2.8,-6.2] cm, then use the visible midpoint between thumb and index as the actual contact point.
+Correct the palm by neck minus that observed midpoint before closure. Pinch and lift only 2 cm first; if the
+flower stays down, correct the finger-gap offset from the new view. Once it rises, carry above the vase
+mouth, turn stem downward, lower and open.
 
 ## LiftPegUpright-v1
 
-Measure the red-blue seam at the middle of the 24 cm peg. In one execute_actions issue exactly three actions:
-(1) move_to the seam XY at table+2.5 cm, omit orientation; (2) close fully; (3) tilt and lift the gripped
-midpoint simultaneously, moving about one half-length toward the pedestal to table+12 cm. Keep gripping. For a
-shaft along robot X with the starting top-down wrist yaw near -pi/2, retain yaw, pitch 0, and command roll +1.30
-radians, slightly through vertical, so the peg sweeps through upright. The rising midpoint gives the lower end
-clearance in this combined move.
+Segment each colored half. Use the midpoint of their two centers for the grasp XY. Batch move directly to
+the seam at table+2.5 cm, close, then lift and tilt together. For a shaft running along the robot X axis and
+a top-down wrist near yaw -pi/2, target absolute roll 0.9 rad, pitch 0 and measured yaw. Aim the grasp
+center at table+12 cm and only 5 cm toward the base. The shorter horizontal transport and larger commanded
+tilt let the shaft reach vertical within 50 steps. Keep the grip closed.
 
 ## PegInsertionSide-v1
 
-Before the first move, locate hole center, inward normal, and orange tip. Grasp the white shaft 2–3 cm behind
-its color seam. For a top-down parallel gripper the grasp line is UNORIENTED: compare candidate yaw and yaw+pi
-to measured wrist yaw; wrap both differences to [-pi,pi] and pick the SMALLER absolute turn (at most pi/2). Keep
-measured roll/pitch. Descend, close and lift. Compute actual grip-to-tip vector including the orange section.
-Rotate the held tip by the signed turn from shaft to inward normal. At that RPY queue the pre-insertion pose 2
-cm outside, then advance into the measured hole along its normal; use the same RPY throughout insertion.
+From the first unobstructed view save the orange tip, white shaft, hole center and insertion direction.
+Obtain hole position by back-projecting the rim and using its center on the front plane. Grasp the white
+side of the seam crosswise, then carry toward the hole immediately. Keep a signed vector from TCP to orange
+tip. Apply the wrist yaw change to that vector; TCP target = hole center minus rotated vector minus 2 cm
+along the inward normal. Set yaw and translation together in this move. Then advance along that normal. Use
+the stored aperture while the arm occludes it; consult a second camera once only if contact is off-center.
 
 ## PickCube-v1
 
@@ -64,34 +60,30 @@ the cube centre directly to goal.xyz and hold it still with the gripper closed.
 
 ## PickCubeSO100-v1
 
-The SO100 needs four motions. Measure the cube and green sphere before moving. Preshape in air to opening 0.25.
-Move directly from there to the cube center XY at table + half the cube height + 0.1 cm, XYZ only; the diagonal
-descent is the approach. Grip at 0.12. In one diagonal carry aim the cube at the exact CENTER of the goal. For
-the sphere use the midpoint of opposite contour extrema in table XY, top minus radius in Z; add the closed
-TCP-minus-cube-center offset for the TCP target. Keep holding. If time remains and the cube is outside, use its
-measured residual as a translation from the actual TCP.
+Measure the red cube and green sphere at reset; save the sphere center from its contour and top minus
+radius. Batch the preshape to 0.25, direct descent to cube center at table + half its height, and pinch to
+0.12. Carry immediately. The SO100's nearly horizontal link can bind on a vertical lift with fixed wrist
+pitch. For the carry only, let the wrist pitch open toward the rising arm: target grasp pitch minus 0.25
+rad, retain measured roll/yaw. Aim at the sphere center plus measured closed TCP-minus-cube offset. Keep the
+grip and let the arm settle.
 
 ## PickCubeWidowXAI-v1
 
-The measured reset wrist and jaw opening already suit this cube. Keep both for approach. The first motion is
-XYZ-only, without a preparatory rotation. Localize the cube by opposite visible footprint edges and the goal by
-silhouette center and sphere top minus radius. Descend in one XYZ-only move to the cube footprint center at
-mid-height; close FULLY to 0 and keep 0. A blocked closure goes straight to the goal on the next action. Aim the
-cube about half a goal radius inward from sphere center toward the robot base (horizontal only), leaving
-clearance inside the sphere; correct the target by the measured closed TCP-minus-cube offset. Carry with the
-pitch/yaw measured AFTER closure and roll about 0.2 rad below the grasp roll. Omit a test lift. Hold the closed
-grip once in range to let the arm settle.
+Save green sphere center and red cube footprint from the initial view. Use only three commands for pickup
+and delivery: one straight move from reset to cube mid-height, full closure, then a diagonal carry. The
+reset pose is the hover; an added waypoint puts closure too late for the arm to settle. Keep measured wrist
+on descent. Aim near the sphere center with a horizontal bias of only 0.5 cm toward the base, plus the
+closed TCP-minus-cube offset. On carry retain measured yaw and pitch and reduce roll by 0.2 rad. After
+arrival, keep the grip still.
 
 ## PickSingleYCB-v1
 
-For an elongated YCB item, measure the closer short end relative to the starting TCP. Grasp one pad inside this
-end at its UPPER rim, with the jaw pads overlapping the top part of both side walls; minimize downward travel.
-If the open jaws already span the object, keep the reset wrist and descend XYZ only. If rotation is necessary
-from the image, use the nearest equivalent jaw yaw in the descent command itself. Close fully. One continuous
-carry now goes to the lower interior of the sphere. Tilt the long free end upward only about 30 degrees while
-translating; large wrist turns slow the lift. Compute TCP position from the desired object center and the
-rotated grip offset. For compact objects grip the upper sides centrally and keep grasp orientation. Keep closed
-at the goal.
+Locate the object and green sphere in the first image; save the target before the hand covers it. For a
+small rectangular object pinch the middle of its two long sides at upper sidewall height, jaw line across
+the narrower dimension. Choose the nearer equivalent yaw. Put this yaw and the full descent in the first
+move, then close immediately. The initial pose provides the hover. Carry diagonally directly into the
+sphere, subtracting the measured object-center-minus-TCP offset, and hold still. A separate lift on the spot
+can consume the remaining episode.
 
 ## PlaceSphere-v1
 
@@ -103,14 +95,12 @@ the wrist still with the open-gripper target.
 
 ## PlugCharger-v1
 
-Measure charger body by the full pair of its long edges before grasp. Approach with measured wrist; include a
-needed jaw yaw in the approach XYZ. At the subsequent staging pose after grasp use the image of the held charger
-to check the pin axis against the socket normal; choose the smallest yaw correction aligning the axes. Socket
-opening is 5 cm below top on its front wall. Pin root is 1.2 cm below the plug top on its forward face. Compute
-TCP from the measured pin-root offset. Stage 2 cm before the front wall and advance along the hole normal. If
-blocked, keep the plug gripped; back out 1 cm along the insertion axis, offset laterally or vertically by 0.15
-cm, and reinsert. Alternate signs on subsequent attempts. Stay on this approach line and use the existing camera
-views.
+In the first view identify two distinct white parts: the small loose body with two pins and the larger fixed
+outlet. Segment the small plug first and grasp its body crosswise with a top-down wrist. Batch approach,
+descend and close; preserve measured pitch and roll for this pickup. Use the held plug to find the forward
+pin direction. For the outlet use the center of the wall facing the pins, about 5 cm below its top. Carry
+with the measured pin-to-TCP offset to stage 2 cm in front, turn the pins along the socket normal during
+that carry, then insert straight. Inspect the face from a second camera only if alignment stalls.
 
 ## PokeCube-v1
 
@@ -128,14 +118,12 @@ and lift slightly. Pull toward the goal along the cube-to-goal line without a se
 
 ## PullCubeTool-v1
 
-Before grasp measure both ends of the hook blade, the blue cube footprint, and direction toward the base.
-Approach low above the straight handle with the measured wrist. Descend vertically and close. A needed jaw
-alignment from the image belongs in the approach XYZ command. With the blade-to-TCP offset, precompute THREE
-translations and issue them as ONE execute_actions sequence holding the wrist: (1) one oblique slide around the
-nearest free side, ending just past the far face with the blade outside the cube width; (2) shift sideways at
-that far depth so the blade overlaps the back face; (3) pull 18 cm toward the base. Keep the blade at
-cube-midheight in all three targets. Use the first slide to lift to working height as it moves; no separate
-lift, exploratory partial advances or inspection stop.
+Measure blue cube and both ends of the red tool. Grip the handle, orienting the jaw across it during
+approach. Use the blade's INNER catching face and its farthest corner as offsets from the grasp TCP. Clear
+the cube sideways first by half cube width plus the blade thickness. At that side clearance slide the blade
+beyond the cube's far face, then bring it sideways behind the cube. These legs must not cross the cube. Pull
+straight toward the base far enough for cube-to-base XY distance below 60 cm. Keep the blade face at cube
+mid-height and broadside to the pull.
 
 ## PushCube-v1
 
@@ -144,13 +132,13 @@ cube-to-goal line, then push along that line at the same height.
 
 ## PushT-v1
 
-Measure red and gray T orientations from the uninterrupted 20 cm rear crossbar edges, using the stem to resolve
-sign. Choose the rotation sign on the table. For each crossbar end imagine a tangential push with that turn
-sign; prefer the end whose push ALSO translates red toward gray. Measure the red contact and the gray target
-before moving. Using xyz only (the pusher wrist stays as measured), queue a direct diagonal move to bare table
-just outside the chosen end at half block height, then a 10–12 cm sweep through that end. Read the exposed red
-edges from the end frame. Continue at contact height with a second turning or translating push to align the T; a
-whole-arm retreat consumes the remaining stroke time.
+Use the initial base image as a fixed goal map. The gray printed target sits on the table: obtain its
+corners with single-pixel back_project on the visible gray edges. Red mask is optional; locate its stem and
+crossbar directly in that same image. Compute rotation from stem direction, including its sign. Approach a
+red bar end on bare table at half-height, then push tangentially through it. If the hand covers red after
+contact, shift the pusher laterally by 4 cm in the same low plane and use the newly exposed edge. Execute
+the next push using the saved goal instead of repeatedly segmenting the shaded/covered target. Finish with a
+centered translation if angles match.
 
 ## PutCarrotOnPlateInScene-v1
 
@@ -180,12 +168,11 @@ second downward probe. On contact, carry in one diagonal to towel center at z≈
 
 ## RollBall-v1
 
-This is a single paddle strike. Measure blue ball center B, its radius r, and unit table direction u toward red.
-Pick the low launch point B-(r+2 cm)*u on clear table behind the ball. The diagonal approach ends on bare table
-clear of the ball. Send the WHOLE swing as one execute_actions list in this order: set_gripper(0.25),
-move_to(launch XY, table+r), move_to(B+24 cm*u, table+r+4 cm). Use measured wrist, xyz only. The first move is
-the approach, the second is the follow-through. Let the ball roll independently after the hit; use a return move
-to give it simulation time.
+Measure blue center B and red goal from the wide view. The ball radius is 3.5 cm. Draw the table-plane unit
+vector u from B to the goal. Use the open or partly open hand at reset as a paddle. First action: diagonal
+XYZ-only move straight to bare table behind B at B-7 cm*u, z=table+3.5 cm. No high staging pose or separate
+jaw adjustment. Second action: one uninterrupted stroke toward B+28 cm*u, z=table+3.5 cm. Use the remaining
+steps to let the ball roll; correct only after seeing its actual travel.
 
 ## SO100GraspCube-v1
 
@@ -220,42 +207,34 @@ midpoint at the measured height of the two cube tops.
 
 ## TwoRobotPickCube-v1
 
-Measure the red cube width w. Preserve each arm’s measured wrist by omitting orientation on all translation
-moves. Left directly grasps cube center, then carries it low to a point HALF a cube width past the midline
-toward RIGHT, at table+w. Release to opening 0.75 and clear left by one cube width diagonally up toward its own
-side. Remeasure the cube. Right goes straight to the center of its upper half (table+0.7w) and closes in place
-when the fingers straddle it. A stalled descent within 1 cm with the cube inside the jaw gap is a grasp
-opportunity. Use that frame to locate the now-visible green sphere. Carry straight there, keeping the measured
-cube-center offset in the right grasp.
+Measure red and the green target in the two fixed views before moving. Left takes red with a direct descent
+from reset and full closure, then carries diagonally to a handoff 1.5 cube widths into RIGHT territory at
+one cube height. Open and clear left diagonally toward its base by three cube widths, not just one: leave
+the right arm a free downward path. Right descends directly to the cube upper half and closes; skip the
+extra hover. Carry to the saved target in one move. Keep each arm's reset wrist throughout.
 
 ## TwoRobotStackCube-v1
 
-Green is the BASE and can slide on the table. Measure blue and the target ring. Pick a landing point just inside
-the ring on the GREEN side, at least one cube width clear of blue. Keep each measured wrist throughout, using
-XYZ alone. Right makes a flat pusher: close fingers in free space and position them on the table side of green
-FARTHEST from the landing point, at mid-block height. Use the side view or newly unoccluded green top to center
-the contact. Sweep horizontally through green toward that landing point in one stroke, stopping the finger
-contact face half a cube width short of it. Lift right clear. Measure the actual green top. Left takes blue
-straight at center height, closes, carries to one cube height directly above green center, and opens.
+Measure both cube centers and ring first. If blue sits in the ring, left picks it directly at mid-height and
+closes, then lifts only 5 cm to leave the ring clear. Right descends straight to green at mid-height and
+closes. Place green on the near edge inside the ring in one diagonal carry and open. Left carries its held
+blue onto the newly placed green and opens. Use each arm's reset wrist and use the initial height as its
+approach hover. Spend the 100 steps on carrying blocks rather than raising an idle hand or repositioning the
+wrist.
 
 ## UnitreeG1PlaceAppleInBowl-v1
 
-Use right hand. Measure the fruit equator and bowl rim. First move directly to grasp level: apple center biased
-4 cm toward robot left and 1 cm toward torso, RPY [1.9,-0.15,2.02]. If the fingers surround the fruit, close
-fully even if that reach reports stalled. Keeping the MEASURED closure wrist, lift just one fruit radius in
-place and inspect actual apple height in the head view. If it rose with the hand, keep that hold and transport
-low toward the near edge of the bowl. Change wrist only as needed to clear the rim. Carry above the bowl center,
-release, then raise the hand at least 13 cm above the bowl bottom. If fruit stayed down, reopen and reposition
-once at its newly measured center. Apply any necessary wrist change in the same move as reaching its contact
-position.
+Segment apple and bowl in the head view. Reach with right hand directly to apple equator with TCP 3 cm to
+robot left of its center, RPY [2.5,-0.1,2.02]; this rotates the fingers under the apple as they close. Close
+fully when the palm is beside the fruit. Lift one radius in the direction of the bowl, preserving that
+wrist. Compare the apple to the table: if still down, open, place the finger gap around its visible sides
+and reclose; if it rose, follow through to bowl center, release and clear the bowl vertically by 13 cm.
 
 ## UnitreeG1TransportBox-v1
 
-Use the entire visible top rectangle (36 by 24 cm); its center is the midpoint of opposite corners. Define u
-along the long axis pointing toward robot forward, v perpendicular toward robot left. Right palm approaches the
-NEGATIVE long-axis end, left palm the POSITIVE end. Both contact patches are about 7 cm along +v from their
-respective end centers and 7 cm below the top. Start with the nearer right hand; go directly beside its end with
-the open palm facing the box, then engage left at the opposite end. Keep the palms open to squeeze the end
-faces; a free-space fist wastes the grasp. Verify that both palms touch before lifting. Lift just clear of the
-table, carry toward the other surface maintaining pressure, set down and release. Apply any necessary wrist
-change in the same move as reaching its contact position.
+Use the head view to measure the 36 x 24 cm top rectangle and table height. For each long-axis end, get the
+grasp at its center biased 7 cm toward robot left, 7 cm below top. Assign the end nearer the right palm to
+right, the other to left. Move each palm to its own end early: right contact then left contact, with no trip
+to the empty table or backward excursion. Rotate each open palm inward to face its opposite palm during
+approach. If one reach stalls, command the other arm before retrying. With both hands squeezing, raise each
+end just 2 cm alternately, carry toward the other tabletop maintaining pressure, and release there.
