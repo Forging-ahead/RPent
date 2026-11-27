@@ -114,11 +114,12 @@ views.
 
 ## PokeCube-v1
 
-Use the base view to measure peg, cube and target. Approach the middle of the peg shaft at its measured XY,
-about 4 cm above its top. Descend at the same XY to the shaft center height and close, leaving the far tip
-exposed. Budget 25 of the 50 steps for this grasp. With that grip and measured wrist height, align the TIP just
-behind the cube on the cube-to-target line, then push the cube inside the circle using the tip-to-TCP offset.
-Hold the wrist still with set_gripper(0) while the episode continues.
+From the base view measure the shaft midline, working tip, cube and target. Grasp about 1 cm from the shaft
+midpoint toward its blunt end. First batch: hover 4 cm above the shaft top; descend at the same XY straight to
+1.8 cm BELOW the top; close fully. These are the only approach waypoints. At finger contact use the
+just-measured TCP z for both remaining moves. Batch a lateral alignment that brings the tip to the cube's near
+face on the push line, then a push along that line into the circle. This alignment also tests the grasp. Keep
+the grip and wrist still to settle.
 
 ## PullCube-v1
 
@@ -196,12 +197,12 @@ with this grip; check whether the cube rises before considering reopening.
 
 ## StackCube-v1
 
-Plan two batches from the initial red and green segment receipts. Batch 1: move to red's reported XY at table
-height + half the red height + 0.1 cm, then close fully. A blocked close with a finger gap is the cue to start
-batch 2. Batch 2: one diagonal move_to over green, then full opening. This diagonal is the grasp-check lift AND
-the carry; verify the lift at the destination. Aim inside green's top toward red by up to 1 cm in x and 1.5 cm
-in y. Target green top + half red height + 1.5 cm in z. Keep the measured wrist. Reserve the final two of
-{max_episode_steps} steps for release.
+The tabletop cubes have 4 cm edges. Use two batches. From the initial clear wrist, move to red's segmented XY
+(round to 0.1 cm), z = table height + 2.1 cm, then close. On finger contact the lift and carry are one diagonal
+move followed by full opening. Use green's measured top and the physical red half-edge of 2.0 cm: the release
+TCP z is green top + 2.0 + 1.5 cm. For release XY aim inside green's top, toward red by up to 1 cm in x and 1.5
+cm in y. Keep wrist orientation throughout. Open immediately on arrival to let red settle on green within
+{max_episode_steps} steps.
 
 ## StackGreenCubeOnYellowCubeBakedTexInScene-v1
 
