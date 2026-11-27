@@ -2,10 +2,11 @@
 
 ## DrawSVG-v1
 
-Trace the actual black SVG on the white canvas, including its interior turns. If the pen hides the outline, move
-it up and aside first. Pick two consecutive visible corners, back-project their pixels, then immediately execute
-hover, lower to canvas height, and draw that first segment. Continue from its endpoint in small batches. Lift
-across visible gaps. Re-image after each batch instead of mapping the entire outline upfront.
+Clear the pen from the outline and keep that base-camera frame as a map. Segment the black path once.
+Back-project the centerline pixels at both ends of the first visible edge in that frame, then batch hover, lower
+to canvas height and trace. For the next edge reuse the last endpoint and back-project the next corner. Join
+consecutive edges at drawing height, lift across gaps, and cover interior strokes. Compare the ink with the map
+after each group of strokes.
 
 ## DrawTriangle-v1
 
@@ -94,11 +95,11 @@ at the goal.
 
 ## PlaceSphere-v1
 
-Budget 50 steps: grasp by about 23, one carry of roughly 14–17 steps, begin releasing by about 40. The first
-motion goes straight to the sphere equator using XY from its top depth band, then close fully. Following contact
-send [move_to(bin center XY, rim top + ball radius + 0.3 cm), set_gripper(1)] in one call. Start this low
-diagonal carry directly from the grasp. It both lifts and transfers the ball. A centered low release lets it
-settle in the bin.
+Grasp straight down at the sphere's equator with the measured wrist. Once the fingers close, carry diagonally to
+the bin center, accounting for the sphere-to-TCP offset. Set the height so the sphere's underside meets the
+support before release. Batch this single carry and set_gripper(opening=1); reserve the last ten of 50 steps for
+release and settling. If the ball is in the bin and the episode continues, repeat the open-gripper target at the
+same wrist pose to let it settle.
 
 ## PlugCharger-v1
 
@@ -113,10 +114,11 @@ views.
 
 ## PokeCube-v1
 
-Grip the peg with its far end exposed and record TCP z after closing. Keep precisely that measured z for BOTH
-moves: shift the tip onto the cube-to-bullseye line immediately behind the cube, then push far enough along that
-line for the cube center to enter the bullseye. Derive each TCP target from the current tip offset. Keep wrist
-and grip fixed.
+Grip the peg with its far end exposed. Use the measured tip-to-TCP offset to align just behind the cube on the
+line to the bullseye. Keep the post-grasp height and wrist angle. Push into the near half of the circle, leaving
+several of the 50 steps for braking. Batch the final push and set_gripper(opening=0) to hold the wrist still. If
+the cube is inside and the episode continues, repeat the stationary grip command. A camera view or final reply
+advances no physics.
 
 ## PullCube-v1
 
@@ -186,31 +188,29 @@ to give it simulation time.
 
 ## SO100GraspCube-v1
 
-Save the start pose and pre-close to 0.25. For cube-center pixel (col,row), U=2*col/W-1, V=2*row/H-1,
-t=33.7/(0.570+0.401*V). The table XY estimate F(pixel) in cm is [30+t*(-0.684+0.271*U+0.231*V),
--50+t*(0.456+0.406*U-0.154*V)]. Approach there with the measured wrist. Near cube height compare the gap
-midpoint pixel with the cube center; add F(cube)-F(gap) to measured XY. Descend to about 1.4 cm, gently close to
-0.12 and lift toward the saved start with this grip. Reopen above the table before any retry.
+Save the initial TCP pose and pre-close to 0.25. For pixel (col,row), U=2*col/W-1, V=2*row/H-1,
+t=33.7/(0.570+0.401*V). Table XY in cm is F=[30+t*(-0.684+0.271*U+0.231*V), -50+t*(0.456+0.406*U-0.154*V)].
+Approach with the measured wrist. Center the gap by adding F(cube)-F(gap) to measured XY, descend to 1.4–1.6 cm,
+and close to 0.12. Next lift toward the saved initial pose with that grip, including after a partial close.
+Continue to the saved pose when the cube rises with the fingers. Reopen for a retry only if the lift visibly
+leaves the cube on the table.
 
 ## StackCube-v1
 
-The wrist starts pointing down in a clear hover. Keep that orientation and move directly to the red cube centre,
-half its height above the table. Close, then plan a single carry that clears the green cube before the cubes
-overlap. Align the red cube centre over the green top, accounting for any offset from the gripper, and open
-immediately with time left for settling. For gaps over 15 cm, budget release before carrying. On a clear path,
-batch one diagonal move_to to the release pose followed by set_gripper with opening 1. The diagonal itself
-raises the cube during transfer. The full sequence has {max_episode_steps} environment steps. Use the red cube
-center for the grasp, about 0.1 cm above its mid-height. For a long carry, offset the release center from green
-toward red on each axis separately, by up to 1 cm in x and 1.5 cm in y, while keeping the red center over green.
-Set the release height to green's top plus half the red cube height and 1.5 cm of clearance. Batch this single
-diagonal carry and full opening. Reach the release pose by step 48.
+Use the initial hover and omit orientation_rpy. Go straight to red's center at half its height plus 0.1 cm and
+close. You have {max_episode_steps} steps. On a clear path, the next move goes diagonally from the grasp to the
+release pose over green. A separate vertical lift consumes the release budget. Account for the grasp offset. Aim
+inside green's top toward red by up to 1 cm in x and 1.5 cm in y; set red's center at green's top plus half the
+red height and 1.5 cm clearance. Batch this one move_to and set_gripper(opening=1). Reach release height with at
+least two steps left.
 
 ## StackGreenCubeOnYellowCubeBakedTexInScene-v1
 
-For this fixed 512px Bridge camera use the visible [row,col]: r=(row-256)/100, c=(col-256)/100, d=1+.158*r.
-Table-object XY in mount cm is about [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Use centers of the green and
-yellow cube boxes. From a low hover over green, lower the TCP to the middle of the 3cm cube and close in one
-batch. Lift clear, carry over yellow, lower green onto its top and open.
+For the fixed 512px camera use cube centers: r=(row-256)/100, c=(col-256)/100, d=1+.158*r. Table XY in mount cm
+is [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Start about 5 cm above green's top. Lower directly to its
+mid-height and close. Both cubes are 3 cm tall. Lift just high enough to clear yellow and transfer at that
+height. Center green over yellow and use the measured grasp offset to lower its underside onto yellow's top.
+Batch that contact-height move with full opening before step 60.
 
 ## StackPyramid-v1
 
