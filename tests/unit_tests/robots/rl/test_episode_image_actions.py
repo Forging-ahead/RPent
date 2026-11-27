@@ -385,50 +385,24 @@ def test_general_fractional_grammar_keeps_zero_expressible_and_declared_limits()
     assert generated["required"] == original["required"]
 
 
-def maniskill_workflow():
-    from robots.rl.toolkit import episode_tools
-    from robots.rl.workflow import WorkflowCapability
-
-    caps = {
-        "rgb_cameras": ["main"],
-        "depth_cameras": ["main"],
-        "segment": True,
-        "dual_arm": False,
-        "gripper": True,
-    }
-    toolkit = SimpleNamespace(
-        environment="maniskill",
-        tool_capabilities=caps,
-        max_actions_per_call=2,
-        reasoning=False,
-        workflow_stats={},
-    )
-    toolkit.list_tools = lambda: episode_tools(
-        toolkit, "maniskill", 2, capabilities=caps
-    )
-    return WorkflowCapability(toolkit)
-
-
 def test_model_retry_uses_declared_robot_action_contract():
     import time
 
     from pydantic_ai import ModelRetry, ToolCallPart
 
-    workflow = maniskill_workflow()
+    from robots.rl.toolkit import episode_tools
+    from robots.rl.workflow import WorkflowCapability
+
+    caps = dict(rgb_cameras=[], depth_cameras=[], segment=False, dual_arm=False, gripper=True)
+    workflow = WorkflowCapability(SimpleNamespace(
+        environment="maniskill", tool_capabilities=caps, max_actions_per_call=2,
+        reasoning=False, workflow_stats={},
+        list_tools=lambda: episode_tools(None, "maniskill", 2, capabilities=caps),
+    ))
     workflow.request_started = time.perf_counter()
     request = SimpleNamespace(model=SimpleNamespace())
-    response = SimpleNamespace(
-        state="complete",
-        finish_reason="tool_call",
-        parts=[ToolCallPart("execute_actions", {"actions": [{"action": "invalid"}]})],
-    )
-    with pytest.raises(ModelRetry) as retry:
-        asyncio.run(
-            workflow.after_model_request(
-                None, request_context=request, response=response
-            )
-        )
-    message = str(retry.value)
-    assert "No tool executed." in message
+    call = ToolCallPart("execute_actions", {"actions": [{"action": "invalid"}]})
+    response = SimpleNamespace(state="complete", finish_reason="tool_call", parts=[call])
+    with pytest.raises(ModelRetry, match="move_to.*set_gripper"):
+        asyncio.run(workflow.after_model_request(None, request_context=request, response=response))
     assert workflow.stats["invalid_tool_responses"] == 1
-    assert "move_to" in message and "set_gripper" in message

@@ -91,20 +91,10 @@ def test_local_maniskill_config_preserves_task_seed_and_native_step_budget(
     parser = argparse.ArgumentParser()
     spec = get_robot_spec()
     spec.add_cli_args(parser, False)
-    args = parser.parse_args(
-        [
-            "--simulator",
-            "maniskill",
-            "--task-name",
-            name,
-            "--seed",
-            "19",
-            "--max-episode-steps",
-            "12",
-            "--image_size",
-            "256",
-        ]
-    )
+    args = parser.parse_args([
+        "--simulator", "maniskill", "--task-name", name, "--seed", "19",
+        "--max-episode-steps", "12", "--image_size", "256",
+    ])
     args.output_dir = tmp_path
     daemons, kwargs = spec.init_runtime(
         args, tmp_path, NullDashboardEventSink(), {"env", "sam3"}

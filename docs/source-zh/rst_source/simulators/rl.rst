@@ -1,7 +1,7 @@
 机器人 Episode
 ==============
 
-用同一套 episode 在 LIBERO、RoboTwin、RoboCasa、RoboDojo 和 ManiSkill 中运行模型。ManiSkill 按任务的机器人选择动作。模型通过 ``execute_actions`` 执行动作，有策略相机时可通过 ``view_env`` 取图。
+用同一套 episode 在 LIBERO、RoboTwin、RoboCasa、RoboDojo 或 ManiSkill 中运行模型。通过 ``execute_actions`` 控制机器人，通过 ``view_env`` 读取策略相机图像。仿真器测量状态并返回原生结果。
 
 安装仿真环境
 ------------
@@ -30,9 +30,9 @@
    * - RoboDojo
      - Python 3.11、Isaac Sim 5.1 和 RTX GPU。将 RoboDojo 资产和评测布局放在 ``ROBODOJO_ASSETS_ROOT``。见 :doc:`robodojo`。
    * - ManiSkill
-     - Python 3.12、Linux 和支持 Vulkan 渲染的 NVIDIA GPU。已有资产时，将 ``MS_ASSET_DIR`` 指向含有 ``data/`` 的资产根目录。首次安装时，将该变量设为新目录，在仿真环境中执行 ``python -m mani_skill.utils.download_asset all -y``。对已有资产执行 ``-y`` 会替换对应文件。
+     - Linux、Python 3.12 和支持 Vulkan 的 NVIDIA GPU。将 ``MS_ASSET_DIR`` 指向资产根目录。在新的资产目录中运行 ``python -m mani_skill.utils.download_asset all -y``。
 
-准备兼容 OpenAI API 的模型服务和 SAM3 服务。在负责 SAM3 的 Python 环境中安装 ``sam3`` extra，把 ``SAM3_CHECKPOINT_PATH`` 设为本机权重文件。用分配给 SAM3 的 GPU 启动服务。
+准备模型服务。使用 SAM3 时，在对应的 Python 环境中安装 ``sam3`` extra，把 ``SAM3_CHECKPOINT_PATH`` 设为本机权重文件。用分配给 SAM3 的 GPU 启动服务。
 
 .. code-block:: bash
 
@@ -55,16 +55,13 @@
 
 RoboTwin、RoboCasa 和 RoboDojo 使用 ``--simulator`` 和 ``--task-name``。RoboDojo 可用 ``--layout`` 指定评测布局。输出目录保存图像、实测状态、工具回执和原生终局。批量采集用 ``tools/rl/run_batch.py`` 读取 JSON 任务清单，逐条封存并支持续跑。
 
-ManiSkill 直接接受注册的 Gymnasium 任务 ID。例如，运行双臂任务可用
-``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``。
-对于机械臂，初始观测给出实测末端位姿。夹爪机械臂使用 ``move_to`` 和 ``set_gripper``，双臂任务指定左右臂，画笔使用 ``move_to``。
+用 DeepSeek Flash 运行 ManiSkill 注册任务时，先激活 ``.venv-maniskill`` 并设置 ``DEEPSEEK_API_KEY``，再运行以下命令。
 
-环境采用任务注册时定义的最大步数。策略相机按 512 × 512 渲染。视频保存初始画面和每个原生控制步的画面，以 20 fps 编码。
-SAM3 为可选服务。轨迹保存原生累计回报，
-有成功判据时记录其值，缺少判据时保存为 JSON ``null``。
+.. code-block:: bash
 
-在仿真服务器运行 ``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``
-可逐个验收入选的末端位姿任务。每项测试会重置环境、读取可用的策略相机，并通过 RPent 执行该机器人的动作。
+   bash tools/rl/run_maniskill_deepseek.sh --task-name PickCube-v1 --seed 0
+
+设置 ``RPENT_SAM3_ENDPOINT`` 可启用分割。回合记录原生累计回报及成功判定，缺少原生成功判据的任务将成功字段记为 ``null``。
 
 提供训练工具服务
 ----------------

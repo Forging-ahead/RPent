@@ -1,9 +1,9 @@
 Robot episodes
 ==============
 
-Run one model against LIBERO, RoboTwin, RoboCasa, RoboDojo or ManiSkill using
-the same episode loop. ManiSkill selects actions for the task's robot. The model calls
-``view_env`` when the task provides a policy camera.
+Run one model against LIBERO, RoboTwin, RoboCasa, RoboDojo or ManiSkill.
+Use ``execute_actions`` to move the robot and ``view_env`` to read policy camera images.
+The simulator measures state and reports native results.
 
 Install the simulator
 ---------------------
@@ -36,9 +36,9 @@ Choose the line for the environment you will run.
    * - RoboDojo
      - Python 3.11, Isaac Sim 5.1 and an RTX GPU. Prepare the RoboDojo assets and evaluation layouts under ``ROBODOJO_ASSETS_ROOT``. See :doc:`robodojo`.
    * - ManiSkill
-     - Python 3.12, Linux and an NVIDIA GPU with Vulkan for rendering. If the assets are installed, set ``MS_ASSET_DIR`` to the root containing their ``data/`` directory. For a fresh installation, set that variable to a new directory and run ``python -m mani_skill.utils.download_asset all -y`` in the simulator environment. The downloader replaces existing targets when run with ``-y``.
+     - Linux, Python 3.12 and an NVIDIA GPU with Vulkan. Set ``MS_ASSET_DIR`` to the asset root. In a fresh asset directory, run ``python -m mani_skill.utils.download_asset all -y``.
 
-Provide an OpenAI-compatible model endpoint and a SAM3 service. Install the
+Provide a model endpoint. To use SAM3, install the
 ``sam3`` extra in the Python environment that serves SAM3 and set
 ``SAM3_CHECKPOINT_PATH`` to the local checkpoint. Run SAM3 on its assigned GPU.
 
@@ -68,21 +68,15 @@ the images, measured states, tool results and native outcome. Use
 ``tools/rl/run_batch.py`` with a JSON list of task descriptions for collection
 with per-episode completion records and resume.
 
-For ManiSkill, pass the registered Gymnasium task ID, for example
-``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``.
-For arms, the opening observation includes the measured TCP pose. Use
-``move_to`` and ``set_gripper`` for a grasping arm, select the arm on a
-two-arm robot, or use ``move_to`` for a drawing tip.
+To run a registered ManiSkill task with DeepSeek Flash, activate ``.venv-maniskill``,
+set ``DEEPSEEK_API_KEY``, and run the command below.
 
-The environment uses the task's registered episode horizon. Policy cameras
-render at 512 × 512. The video includes the initial image and one image per
-native control step, encoded at 20 fps.
-SAM3 is optional. An episode reports its native return and the task's success
-criterion when defined. A missing success criterion is recorded as JSON ``null``.
+.. code-block:: bash
 
-To verify the integration for each supported pose task on the simulator host, run
-``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``.
-Each case resets the task, reads its policy cameras and issues a robot-specific action through RPent.
+   bash tools/rl/run_maniskill_deepseek.sh --task-name PickCube-v1 --seed 0
+
+Set ``RPENT_SAM3_ENDPOINT`` to enable segmentation. The episode records its native
+return and success. Tasks without a native success criterion record ``null``.
 
 Serve training tools
 --------------------
@@ -106,8 +100,7 @@ See the `RLinf training guide <https://github.com/zhexuanxu/RLinf/blob/rpent-ppo
 Coordinates and actions
 -----------------------
 
-Positions,
-lengths and linear velocities use centimetres at the model
+Positions, lengths and linear velocities use centimetres at the model
 interface. Orientations use fixed-axis XYZ roll, pitch and yaw in radians.
 The frame origin is the measured arm mount, or the midpoint of the two
 mounts. Forward, robot left and up are positive X, Y and Z. The back projection

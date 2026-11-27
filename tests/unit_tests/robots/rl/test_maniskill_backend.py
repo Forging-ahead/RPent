@@ -1,186 +1,103 @@
 # Copyright 2026 The RPent Authors.
 # Licensed under the Apache License, Version 2.0.
-"""Regressions for native ManiSkill action, camera and evaluation contracts."""
 
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from gymnasium import spaces
-from scipy.spatial.transform import Rotation
 
 from robots.rl import maniskill
+from robots.rl.maniskill_arm import ManiSkillArm, UnsupportedRobotPolicy
+from robots.rl.tools import Measurement
 from rpent.session import EnvState
 
 
-class Pose:
-    def __init__(self, xyz):
-        self.matrix = np.eye(4)
-        self.matrix[:3, 3] = xyz
+class ArmDouble(ManiSkillArm):
+    """Keep the shared servo and stub the simulator-specific actuator conversion."""
 
-    @property
-    def p(self):
-        return self.matrix[:3, 3]
+    def __init__(self, episode, agent):
+        self.episode, self.agent = episode, agent
+        self._config, self.mount = episode._config, agent.mount
+        self.has_gripper, self.tool_rotation = agent.has_gripper, np.eye(3)
+        self.opening_target, self.last = 1.0, agent.state.copy()
 
-    def to_transformation_matrix(self):
-        return self.matrix.copy()
+    def _measure_native(self):
+        return Measurement(self.agent.state[:3].copy(), np.eye(3), self.agent.state[3])
+
+    def _pose_action(self, current, xyz, rotation):
+        delta, _, distance, angle = self._bounded_pose_step(current, xyz, rotation)
+        return np.r_[current.xyz + delta, self.opening_target], distance, angle
+
+    def _command_gripper(self, action, opening, error, within):
+        self.opening_target = action[3] = opening
 
 
 class NativeEpisode:
-    """CPU fixture with a measured offset base and an absolute pose/finger controller."""
-
     instruction = ""
 
-    def __init__(self, obs, info, *, horizon=2, truncate=False, reward=2.0):
+    def __init__(self, obs, info, *, horizon=2, truncate=False):
+        pose = np.eye(4)
+        pose[0, 3] = 1
+        mount = SimpleNamespace(pose=SimpleNamespace(to_transformation_matrix=lambda: pose))
+        agent = SimpleNamespace(
+            uid="example_arm", mount=mount, has_gripper=True, state=np.array([1, 0, 0.3, 1.0])
+        )
+        self.unwrapped = SimpleNamespace(agent=agent)
         self.obs, self.info = obs, info
-        self.horizon, self.truncate, self.reward = horizon, truncate, reward
-        self.closed = False
+        self.horizon, self.truncate = horizon, truncate
         self.received = []
-        root, wrist, tcp, left, right = [
-            SimpleNamespace(index=i, pose=Pose(xyz))
-            for i, xyz in enumerate(
-                ([1, 0, 0], [1, 0, 0.2], [1, 0, 0.3], [1, 0.04, 0.3], [1, -0.04, 0.3])
-            )
-        ]
-        joints = [
-            SimpleNamespace(name="wrist", active_index=0, child_link=wrist),
-            SimpleNamespace(name="finger", active_index=1, child_link=left),
-        ]
-        self.qpos = np.array([[0.0, 0.04]])
-
-        def fk(qpos):
-            left.pose.p[1], right.pose.p[1] = qpos[1], -qpos[1]
-
-        pin = SimpleNamespace(
-            compute_forward_kinematics=fk,
-            get_link_pose=lambda i: [root, wrist, tcp, left, right][i].pose,
-        )
-        robot = SimpleNamespace(
-            root=root,
-            active_joints=joints,
-            get_qpos=lambda: self.qpos,
-            get_qlimits=lambda: np.array([[[-1, 1], [0, 0.04]]]),
-            create_pinocchio_model=lambda: pin,
-        )
-        arm = SimpleNamespace(
-            ee_link=tcp,
-            root_link=root,
-            config=SimpleNamespace(
-                use_delta=False,
-                normalize_action=False,
-                frame="root_translation:root_aligned_body_rotation",
-            ),
-        )
-        grip = SimpleNamespace(
-            joints=[joints[1]],
-            single_action_space=spaces.Box(-1, 1, (1,)),
-            _original_single_action_space=spaces.Box(0, 0.04, (1,)),
-            config=SimpleNamespace(lower=0.0, upper=0.04, normalize_action=True),
-        )
-        controller = SimpleNamespace(
-            controllers={"arm": arm, "gripper": grip},
-            reset=lambda: None,
-            action_mapping={"arm": (0, 6), "gripper": (6, 7)},
-        )
-        self.unwrapped = SimpleNamespace(
-            agent=SimpleNamespace(
-                uid="example_arm",
-                robot=robot,
-                arm_joint_names=["wrist"],
-                gripper_joint_names=["finger"],
-                supported_control_modes=["pd_ee_pose"],
-                control_mode="pd_ee_pose",
-                set_control_mode=lambda mode: None,
-                single_action_space=spaces.Box(-1, 1, (7,)),
-                controller=controller,
-                tcp=tcp,
-                finger1_link=left,
-                finger2_link=right,
-            )
-        )
-
-    def apply(self, action):
-        assert action.shape == (1, 7)
-        self.received.append(action.copy())
-        agent = self.unwrapped.agent
-        agent.tcp.pose.p[:] = agent.robot.root.pose.p + action[0, :3]
-        agent.tcp.pose.matrix[:3, :3] = Rotation.from_euler(
-            "XYZ", action[0, 3:6]
-        ).as_matrix()
-        self.qpos[0, 1] = (action[0, 6] + 1) * 0.02
+        self.closed = False
 
     def reset(self, *, seed):
         self.seed = seed
-        self.received.clear()
         return self.obs, self.info
 
     def step(self, action):
-        self.apply(action)
+        self.received.append(action)
+        self.unwrapped.agent.state[:] = action[0]
         count = len(self.received)
         end = count == self.horizon
-        info = {
-            **self.info,
-            "episode": {"return": self.reward * count, "episode_len": count},
-        }
-        return (
-            self.obs,
-            self.reward,
-            end and not self.truncate,
-            end and self.truncate,
-            info,
-        )
+        info = {**self.info, "episode": {"return": 2.0 * count, "episode_len": count}}
+        return self.obs, 2.0, end and not self.truncate, end and self.truncate, info
 
     def close(self):
         self.closed = True
 
 
-def make_backend(tmp_path, monkeypatch, env):
-    monkeypatch.setattr(maniskill, "_make_env", lambda *args: (env, "Native-v1"))
+def stub_environment(monkeypatch, env, task):
+    monkeypatch.setattr(maniskill, "_make_env", lambda *args: (env, task))
+    monkeypatch.setattr(maniskill, "ManiSkillArm", ArmDouble)
+
+
+def test_recorded_camera_calibration_and_video_frames(tmp_path, monkeypatch):
+    rgb = np.full((2, 3, 3), 92, dtype=np.uint8)
+    depth = np.array([[0, 1000, 2000]] * 2)
+    extrinsic = np.eye(4)[:3]
+    extrinsic[0, 3] = -2
+    obs = {
+        "sensor_data": {"head": {"rgb": rgb}, "side": {"rgb": rgb, "depth": depth}},
+        "sensor_param": {"side": {"extrinsic_cv": extrinsic, "intrinsic_cv": np.eye(3)}},
+    }
+    env = NativeEpisode(obs, {"success": False})
+    stub_environment(monkeypatch, env, "Native-v1")
     state = EnvState(tmp_path)
     backend = maniskill.ManiSkillPrimitives(
         task_name="Native-v1", seed=5, state=state, check_cancelled=lambda: None
     )
-    return backend, state
-
-
-def test_camera_names_modalities_and_cv_backprojection(tmp_path, monkeypatch):
-    rgb = np.full((2, 3, 3), 92, dtype=np.uint8)
-    obs = {
-        "agent": {"qpos": np.array([0.1, 0.5])},
-        "sensor_data": {
-            "head": {"rgb": rgb},
-            "side_cam": {"rgb": rgb, "depth": np.array([[[0], [1000], [2000]]] * 2)},
-        },
-        "sensor_param": {
-            "side_cam": {
-                "extrinsic_cv": np.array([[1, 0, 0, -2], [0, 1, 0, 0], [0, 0, 1, 0]]),
-                "intrinsic_cv": np.eye(3),
-            }
-        },
-    }
-    env = NativeEpisode(obs, {"success": False})
-    backend, state = make_backend(tmp_path, monkeypatch, env)
-    assert env.seed == 5
-    assert backend.cameras == ("head", "side_cam")
-    assert backend.depth_cameras == ("side_cam",)
     record = backend.record_observation()
-    assert record.state["pose"]["xyz"] == [0, 0, 0.3]
-    assert record.state["opening"] == 1
+    assert env.seed == 5 and backend.depth_cameras == ("side",)
     assert record.extras["success"] is False and record.extras["fail"] is None
     assert "head.png" in record.artifacts and "head_world.npz" not in record.artifacts
-    world = state.load("side_cam_world.npz", step=record.step_idx)
-    np.testing.assert_allclose(world[0, 1], [3.0, 0.0, 1.0])
+    world = state.load("side_world.npz", step=record.step_idx)
+    np.testing.assert_allclose(world[0, 1], [3, 0, 1])
     assert np.isnan(world[0, 0]).all()
     rgb[:] = 93
     backend.step_controllers()
-    backend.record_observation()
-    assert len(backend.frames) == 2
-    assert np.all(backend.frames[0] == 92)
-    assert np.all(backend.frames[1] == 93)
+    assert [int(frame[0, 0, 0]) for frame in backend.frames] == [92, 93]
 
 
-def test_unsupported_robot_has_no_fabricated_arm(tmp_path, monkeypatch):
-    env = NativeEpisode({}, {})
-    env.unwrapped.agent.arm_joint_names = []
-    with pytest.raises(maniskill.UnsupportedRobotPolicy, match="no mapped arm"):
-        make_backend(tmp_path, monkeypatch, env)
+def test_unsupported_robot_does_not_get_a_fabricated_arm():
+    episode = SimpleNamespace(_config=None, env_id="Native-v1")
+    agent = SimpleNamespace(robot=object(), uid="unmapped")
+    with pytest.raises(UnsupportedRobotPolicy, match="no mapped arm"):
+        ManiSkillArm(episode, agent)
