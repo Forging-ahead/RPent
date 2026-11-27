@@ -356,3 +356,34 @@ def test_planner_episode_terminal_contract(
     assert outcome["terminal"] is terminal
     assert outcome["termination_reason"] == reason
     assert outcome["success"] is success
+
+
+@pytest.mark.parametrize(
+    ("terminated", "truncated", "fail", "reason"),
+    [
+        (True, False, True, "environment_failure"),
+        (True, False, None, "environment_terminated"),
+        (False, True, None, "environment_step_limit"),
+        (False, False, None, "request_limit"),
+    ],
+)
+def test_maniskill_outcome_preserves_native_return_without_success(
+    terminated, truncated, fail, reason
+):
+    native = dict(success=None, fail=fail, episode_return=2.75,
+                  terminated=terminated, truncated=truncated)
+    toolkit = SimpleNamespace(environment="maniskill", native_outcome=lambda: native,
+                              state=SimpleNamespace(records=lambda: []))
+    result = SimpleNamespace(stats={"turns_used": 4}, error=None, error_kind=None)
+    outcome = rl_episode.episode_outcome(result, toolkit, max_turns=4)
+    assert outcome == {
+        **native,
+        "terminal": True,
+        "termination_reason": reason,
+        "error": None,
+        "error_kind": None,
+    }
+    toolkit.infrastructure_error = "RPC disconnected"
+    failed = rl_episode.episode_outcome(result, toolkit, max_turns=4)
+    assert failed["termination_reason"] == "infrastructure_error" and not failed["terminal"]
+    assert {key: failed[key] for key in native} == native

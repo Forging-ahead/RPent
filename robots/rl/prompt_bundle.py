@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 def system_prompt(variables: Mapping[str, object] | None = None) -> str:
-    """Render the robot description with the fixed centimetre interface."""
+    """Render the selected simulator's policy observation and action interface."""
     variables = variables or {}
     environment = variables.get("environment", "libero")
     prompts = Path(__file__).parent / "prompts"

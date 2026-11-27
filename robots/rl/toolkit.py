@@ -37,6 +37,10 @@ from rpent.utils.serialization import write_json_atomic as write_json
 
 def primitive_owner(environment: str):
     """Select the same primitive owner class for local and remote execution."""
+    if environment == "maniskill":
+        from robots.rl.maniskill import ManiSkillPrimitives
+
+        return ManiSkillPrimitives
     if environment == "libero":
         from robots.rl.tools import LiberoRLPrimitives
 
@@ -57,32 +61,63 @@ def primitive_owner(environment: str):
     raise ValueError(f"Unsupported episode environment: {environment}")
 
 
-def episode_tools(toolkit, environment, max_actions, perception=None):
+def episode_tools(
+    toolkit, environment, max_actions, perception=None, *, capabilities=None
+):
     """Build the same model schema without importing native adapters on the client."""
-    from robots.rl.actions import ActionBatch, DualArmBatch, MobileBatch
+    from robots.rl.actions import (
+        ActionBatch,
+        DualArmBatch,
+        MobileBatch,
+        ToolTipBatch,
+    )
     from robots.rl.contracts import coordinate_definition, strict_tool
     from robots.rl.units import model_tool
 
     owner = RecordedPerception if perception is None else perception
-    batch_type = {
-        "libero": ActionBatch,
-        "robocasa": MobileBatch,
-        "robotwin": DualArmBatch,
-        "robodojo": DualArmBatch,
-    }[environment]
+    if environment != "maniskill":
+        rgb = depth = CAMERAS[environment]
+        segment = True
+        batch_type = {
+            "libero": ActionBatch,
+            "robocasa": MobileBatch,
+            "robotwin": DualArmBatch,
+            "robodojo": DualArmBatch,
+        }[environment]
+    else:
+        rgb, depth = capabilities["rgb_cameras"], capabilities["depth_cameras"]
+        segment = capabilities["segment"]
+        if capabilities.get("mobile"):
+            batch_type = MobileBatch
+        elif not capabilities["gripper"]:
+            batch_type = ToolTipBatch
+        else:
+            batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
     batch = batch_type(toolkit).execute_actions
     schema = batch.input_schema
+    if environment == "maniskill" and batch_type is MobileBatch:
+        schema["$defs"]["BaseMove"]["properties"]["vy"].update(
+            minimum=0,
+            maximum=0,
+            description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
+        )
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
         batch,
         _input_schema=schema,
         description=batch.description.replace("1..K", f"1..{max_actions}"),
     )
-    for declaration in (owner.view_env, owner.segment, owner.back_project, batch):
+    camera_tools = (
+        ("view_env", rgb),
+        ("segment", rgb if segment else ()),
+        ("back_project", depth),
+    )
+    tools = [(getattr(owner, name), cameras) for name, cameras in camera_tools if cameras]
+    for declaration, cameras in (*tools, (batch, ())):
         yield model_tool(
             strict_tool(
                 coordinate_definition(declaration),
-                cameras=CAMERAS[environment],
+                cameras=cameras,
             ),
         )
 
@@ -123,20 +158,40 @@ class RLToolkit(Toolkit):
         self._primitives = primitive_owner(environment)(
             state=state, check_cancelled=self.raise_if_cancelled, **runtime_kwargs
         )
-        if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
-            self._primitives.display_size = image_size
-        self.action_error = None
-        self._task = self._primitives.env.get_task_language()
-        self._publish_step(self._primitives.record_observation())
-        self._recorded_env_steps = 0
-        self.add_tools(
-            episode_tools(
-                self,
-                environment,
-                max_actions_per_call,
-                perception=self._primitives,
+        native = self._primitives
+        self.tool_capabilities = None
+        try:
+            if environment == "maniskill":
+                native.display_size = image_size
+                self._task = native.task
+                self.tool_capabilities = {
+                    "rgb_cameras": list(native.cameras),
+                    "depth_cameras": list(native.depth_cameras),
+                    "segment": bool(native.cameras) and native._sam3 is not None,
+                    "dual_arm": native.dual_arm,
+                    "mobile": bool(getattr(native, "mobile", False)),
+                    "gripper": native.has_gripper,
+                }
+            else:
+                if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
+                    native.display_size = image_size
+                self._task = native.env.get_task_language()
+            self.action_error = None
+            self._publish_step(native.record_observation())
+            self._recorded_env_steps = 0
+            self.add_tools(
+                episode_tools(
+                    self,
+                    environment,
+                    max_actions_per_call,
+                    perception=native,
+                    capabilities=self.tool_capabilities,
+                )
             )
-        )
+        except BaseException:
+            if environment == "maniskill":
+                native.env.close()
+            raise
 
     def frame_version(self, *, refresh: bool = False) -> int:
         """Read the measured frame under the episode's exclusive action lock."""
@@ -154,6 +209,12 @@ class RLToolkit(Toolkit):
         """Register no file tools; rollouts observe only through robot tools."""
 
     def _robot_state(self) -> dict[str, Any]:
+        if self.environment == "maniskill":
+            return {
+                **self._primitives.robot_state(),
+                "terminated": self._primitives.terminated,
+                "truncated": self._primitives.truncated,
+            }
         if self.environment != "libero":
             return {
                 **self._primitives.robot_state(),
@@ -202,6 +263,8 @@ class RLToolkit(Toolkit):
                 "state": {"step": step, **self._robot_state()},
             },
         )
+        if self.environment == "maniskill":
+            observation.data["sensors"] = self.tool_capabilities
         observation = self._model_feedback(observation)
         self._count_images(observation)
         self._state.save(
@@ -241,9 +304,10 @@ class RLToolkit(Toolkit):
         except (ValueError, TypeError) as exc:
             from robots.rl.contracts import argument_hint
 
+            hint = argument_hint(name, self.environment, declaration)
             return ToolResult(
                 data={"error": str(exc)},
-                model_text=f"Invalid {name} arguments: {exc}. {argument_hint(name, self.environment)} No tool executed; correct the arguments and try again.",
+                model_text=f"Invalid {name} arguments: {exc}. {hint} No tool executed; correct the arguments and try again.",
             )
         result = self._execute_validated(declaration, input_dict, arguments)
         if self.solved() and self._native_success_seconds is None:
@@ -328,11 +392,17 @@ class RLToolkit(Toolkit):
             self._recorded_env_steps = self._primitives.env_steps
         return ToolResult(data=data)
 
-    def solved(self) -> bool:
+    def solved(self) -> bool | None:
         """Return the environment's latched success flag."""
         if self.environment != "libero":
             return self._primitives.native_success()
         return self._primitives.env.terminated
+
+    def native_outcome(self) -> dict[str, Any]:
+        """Return the current native ManiSkill episode metrics, including partial runs."""
+        return (
+            self._primitives.native_outcome() if self.environment == "maniskill" else {}
+        )
 
     @property
     def infrastructure_error(self) -> dict | None:
@@ -344,6 +414,8 @@ class RLToolkit(Toolkit):
         if self.infrastructure_error is not None:
             return {"status": "error", "reason": "infrastructure_error"}
         if self._primitives.ended:
+            if self.environment == "maniskill":
+                return {"status": "completed", **self.native_outcome()}
             success = self.solved()
             return {"status": "completed", "success": success, "truncated": not success}
         return None
@@ -351,12 +423,24 @@ class RLToolkit(Toolkit):
     def close(self) -> None:
         """Save the episode video and the rollout's observation counts."""
         super().close()
-        self._state.save("episode.mp4", self._primitives.frames, step=None, fps=20)
+        try:
+            self._save_rollout()
+        finally:
+            if self.environment == "maniskill":
+                self._primitives.env.close()
+
+    def _save_rollout(self) -> None:
+        if self._primitives.frames:
+            self._state.save("episode.mp4", self._primitives.frames, step=None, fps=20)
+        contract = {
+            "position_unit": "cm",
+            "coordinate_contract": "episode_coordinates_v2",
+            **self.native_outcome(),
+        }
         self._state.save(
             "rollout.json",
             {
-                "position_unit": "cm",
-                "coordinate_contract": "episode_coordinates_v2",
+                **contract,
                 "episode_contract_version": EPISODE_CONTRACT_VERSION,
                 "reasoning": self.reasoning,
                 "image_size": self.image_size,

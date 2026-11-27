@@ -27,7 +27,12 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from robots.rl.contracts import CAMERAS, EPISODE_CONTRACT_VERSION, EPISODE_OPTIONS
+from robots.rl.contracts import (
+    EPISODE_CONTRACT_VERSION,
+    EPISODE_OPTIONS,
+    SUPPORTED_ENVIRONMENTS,
+    valid_task_identifier,
+)
 from robots.rl.remote import remote_options
 from rpent.utils.config import get_repo_root
 from rpent.utils.daemon import ProcessDaemon
@@ -74,7 +79,7 @@ def validate_request(
     }
     if environment == "robodojo":
         allowed.add("layout")
-    if set(task).difference(allowed) or environment not in CAMERAS:
+    if set(task).difference(allowed) or environment not in SUPPORTED_ENVIRONMENTS:
         raise ValueError("unsupported remote simulator/task fields")
     if environment == "robodojo" and (
         type(task.get("layout", 0)) is not int or task.get("layout", 0) < 0
@@ -90,7 +95,7 @@ def validate_request(
     ):
         raise ValueError("explicit init_state_id must match the native seed index")
     name = task.get("suite") if environment == "libero" else task.get("task_name")
-    if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_]+", name) is None:
+    if not valid_task_identifier(environment, name):
         raise ValueError("invalid native task identifier")
     if environment == "libero" and (
         type(task.get("task")) is not int or task["task"] < 0
@@ -148,7 +153,7 @@ class BackendManager(RpcFacade):
         validate_request(request, set(self.slots), self.simulator)
         if owner_id is not None:
             self._validate_owner(owner_id)
-        if not self.sam3_endpoint:
+        if not self.sam3_endpoint and request["task"]["environment"] != "maniskill":
             raise ValueError("perception workflows require a configured SAM3 endpoint")
         gpu = request["gpu"]
         session = uuid.uuid4().hex
@@ -449,20 +454,21 @@ def main() -> None:
     """Start a backend on explicit GPUs; the default listener is loopback only."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--simulator", choices=tuple(CAMERAS), required=True)
+    parser.add_argument("--simulator", choices=SUPPORTED_ENVIRONMENTS, required=True)
     parser.add_argument(
         "--gpu-slots", required=True, help="Comma-separated GPU:slots, e.g. 0:7,1:14"
     )
     parser.add_argument("--max-initializing-per-gpu", type=int, default=2)
     parser.add_argument(
         "--sam3-endpoint",
-        required=True,
-        help="SAM3 endpoint used by episode perception.",
+        help="SAM3 endpoint for segmentation (optional for ManiSkill).",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=28090)
     parser.add_argument("--parent-watch", action="store_true")
     args = parser.parse_args()
+    if args.simulator != "maniskill" and not args.sam3_endpoint:
+        parser.error("--sam3-endpoint is required for this simulator")
     try:
         slots = dict(
             tuple(map(int, item.split(":"))) for item in args.gpu_slots.split(",")

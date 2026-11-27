@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import itertools
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -25,7 +24,8 @@ from pydantic import Field
 from scipy.spatial.transform import Rotation
 
 from robots.rl import geometry
-from robots.rl.tools import ControlConfig, LiberoRLPrimitives, Measurement, _clip_norm
+from robots.rl.perception import RecordedPerception
+from robots.rl.tools import ControlConfig, LiberoRLPrimitives, Measurement
 from rpent.tools import ToolResult, tool
 from rpent.utils.transforms import quaternion_wxyz, rotation_from_wxyz
 
@@ -48,15 +48,13 @@ class ScenePrimitives(LiberoRLPrimitives):
         check_cancelled,
         max_episode_steps: int = 10000,
     ) -> None:
-        self.env, self._sam3, self._state = env, sam3_client, state
+        self.env = env
+        self._init_perception(state, sam3_client)
         self._check_cancelled = check_cancelled
         self._config = ControlConfig()
         self._max_episode_steps = max_episode_steps
         self.env_steps = 0
         self.frames = []
-        self._masks = {}
-        self._mask_ids = itertools.count(1)
-        self._sam_calls = itertools.count(1)
         self._success = False
 
     @property
@@ -73,29 +71,26 @@ class ScenePrimitives(LiberoRLPrimitives):
     def robot_state(self) -> dict[str, Any]:
         raise NotImplementedError
 
-    def record_observation(self, *, command=None, result=None, elapsed_s=None):
-        state = self.robot_state()
-        with self._state.record_step(
-            state=state,
-            terminated=self.native_success(),
-            truncated=self.env_steps >= self._max_episode_steps,
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            extras={"env_steps": self.env_steps},
-        ) as step:
-            if hasattr(self, "coordinates"):
-                self._save("step_coordinates.json", self.coordinates.metadata(), step)
-            for camera in self.cameras:
-                rgb, world, calibration = self.capture(camera)
-                self._save(f"{camera}_raw.png", rgb, step)
-                rgb = self.annotate(rgb, calibration, state)
-                self._save(f"{camera}.png", rgb, step)
-                self._save(f"{camera}_world.npz", world.astype(np.float32), step)
-                self._save(f"{camera}_calibration.json", calibration, step)
-                if camera == self.cameras[0]:
-                    self.frames.append(rgb)
-        return self._state.get(step)
+    record_observation = RecordedPerception.record_observation
+
+    def _record_status(self):
+        return (
+            self.native_success(),
+            self.env_steps >= self._max_episode_steps,
+            {
+                "env_steps": self.env_steps,
+            },
+        )
+
+    def _record_camera(self, camera, step, state):
+        rgb, world, calibration = self.capture(camera)
+        self._save(f"{camera}_raw.png", rgb, step)
+        rgb = self.annotate(rgb, calibration, state)
+        self._save(f"{camera}.png", rgb, step)
+        self._save(f"{camera}_world.npz", world.astype(np.float32), step)
+        self._save(f"{camera}_calibration.json", calibration, step)
+        if camera == self.cameras[0]:
+            self.frames.append(rgb)
 
     def annotate(
         self, image: np.ndarray, calibration: dict, state: dict | None = None
@@ -207,12 +202,10 @@ class RoboCasaPrimitives(ScenePrimitives):
         self.env_steps += 1
 
     def _pose_action(self, current, xyz, rotation):
-        position = xyz - current.xyz
-        angle = Rotation.from_matrix(rotation @ current.rotation.T).as_rotvec()
-        action = np.zeros(7)
-        action[:3] = _clip_norm(position, self._config.position_step_m)
-        action[3:6] = _clip_norm(angle, self._config.rotation_step_rad)
-        return action, float(np.linalg.norm(position)), float(np.linalg.norm(angle))
+        position, rotation_step, distance, angle = self._bounded_pose_step(
+            current, xyz, rotation
+        )
+        return np.r_[position, rotation_step, 0.0], distance, angle
 
     @tool
     def set_gripper(self, opening: Annotated[float, Field(ge=0, le=1)]) -> ToolResult:
@@ -324,188 +317,10 @@ class RoboCasaPrimitives(ScenePrimitives):
         )
 
 
-class RoboCasaGeneralPrimitives(RoboCasaPrimitives):
-    """Dynamic mounting coordinates with the native grip site, base and lift control."""
+class MeasuredMobileMotion:
+    """Shared base and lift control loops over simulator-specific measured motion."""
 
     BASE_LIMITS = np.array([0.35, 0.35, 0.5], dtype=float)
-    move_to = LiberoRLPrimitives.move_to
-    measure = LiberoRLPrimitives.measure
-    _model_points = LiberoRLPrimitives._model_points
-
-    def _surface_center(self, native: np.ndarray, points: np.ndarray) -> np.ndarray:
-        return np.median(points, axis=0)
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._refresh_coordinates()
-        self._state.save("coordinates.json", self._coordinates_metadata(), step=None)
-
-    def _measure_native(self) -> Measurement:
-        self._control = self.env._client.call("env.coordinate_calibration")
-        return Measurement(
-            np.asarray(self._control["site_xyz"], dtype=np.float64),
-            np.asarray(self._control["site_rotation"], dtype=np.float64),
-            self._opening(),
-        )
-
-    def _tcp_world(self, current: Measurement) -> np.ndarray:
-        return current.xyz
-
-    def _refresh_coordinates(self) -> Measurement:
-        from robots.rl.coordinates import Coordinates, grasp_axes
-
-        native = self._measure_native()
-        coordinates = Coordinates.from_control(self._control)
-        if previous := getattr(self, "coordinates", None):
-            coordinates = coordinates.after(previous)
-        self.coordinates = coordinates
-        self.tool_rotation = grasp_axes(
-            self._control["jaw_slide_axes_site"][0],
-            self._control["wrist_to_site_in_site"],
-        )
-        return Measurement(
-            self.coordinates.points(self._tcp_world(native)),
-            self.coordinates.orientation(native.rotation @ self.tool_rotation),
-            native.opening,
-        )
-
-    def _coordinates_metadata(self) -> dict[str, Any]:
-        metadata = {
-            **self.coordinates.metadata(),
-            "support_surface_kind": self._control.get("support_surface_kind"),
-            "support_surface_source": self._control.get("support_surface_source"),
-            "lift_m": round(float(self._control["lift_m"]), 6)
-            if "lift_m" in self._control
-            else None,
-            "site_world_m": np.asarray(self._control["site_xyz"], dtype=float).tolist(),
-        }
-        if "jaw_slide_axes_site" in self._control:
-            metadata["jaw_slide_axes_site"] = np.asarray(
-                self._control["jaw_slide_axes_site"], dtype=float
-            ).tolist()
-        return metadata
-
-    def robot_state(self) -> dict[str, Any]:
-        measured = self._refresh_coordinates()
-        return {
-            **measured.state(),
-            "finger_gap_m": round(self._finger_gap(), 5),
-            "lift_m": round(float(self._control["lift_m"]), 4),
-            "coordinates": self.coordinates.description(),
-            "env_steps": self.env_steps,
-        }
-
-    def capture(self, camera: str):
-        rgb, depth = self.env.render_camera(camera, depth=True, mask_invalid_depth=True)
-        meta = self.env.get_camera_meta(camera)
-        transform = self.env._client.call(
-            "env.get_camera_transform",
-            kwargs={
-                "camera_name": self.env._resolve_cam(camera),
-                "height": self.env.camera_h,
-                "width": self.env.camera_w,
-            },
-        )
-        depth_arr = np.asarray(depth, dtype=np.float64)
-        near_m = float(meta["depth_near"])
-        far_m = float(meta["depth_far"])
-        valid = (
-            np.isfinite(depth_arr)
-            & (depth_arr > near_m * (1.0 + 1e-4))
-            & (depth_arr < far_m * (1.0 - 1e-5))
-        )
-        safe_depth = np.where(valid, depth_arr, 0.0)
-        rows, cols = np.mgrid[: depth_arr.shape[0], : depth_arr.shape[1]]
-        homogeneous = np.stack(
-            (
-                cols * safe_depth,
-                rows * safe_depth,
-                safe_depth,
-                np.ones_like(safe_depth),
-            ),
-            axis=-1,
-        )
-        world = (homogeneous @ np.asarray(transform, dtype=np.float64).T)[..., :3]
-        world[~valid] = np.nan
-        return (
-            np.asarray(rgb),
-            world,
-            {
-                "pixel_to_world": np.asarray(transform).tolist(),
-                "height": depth_arr.shape[0],
-                "width": depth_arr.shape[1],
-                "intrinsic_K": np.asarray(meta["intrinsic"]).tolist(),
-                "depth_near": near_m,
-                "depth_far": far_m,
-            },
-        )
-
-    def record_observation(self, *, command=None, result=None, elapsed_s=None):
-        state = self.robot_state()
-        with self._state.record_step(
-            state=state,
-            terminated=self.native_success(),
-            truncated=self.env_steps >= self._max_episode_steps,
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            extras={"env_steps": self.env_steps},
-        ) as step:
-            self._save("step_coordinates.json", self._coordinates_metadata(), step)
-            for camera in self.cameras:
-                rgb, world, calibration = self.capture(camera)
-                self._save(f"{camera}_raw.png", rgb, step)
-                rgb = self.annotate(rgb, calibration)
-                self._save(f"{camera}.png", rgb, step)
-                self._save(f"{camera}_world.npz", world.astype(np.float32), step)
-                self._save(f"{camera}_calibration.json", calibration, step)
-                if camera == self.cameras[0]:
-                    self.frames.append(rgb)
-        return self._state.get(step)
-
-    @tool
-    def set_gripper(
-        self, opening: Annotated[float, Field(ge=0.0, le=1.0)]
-    ) -> ToolResult:
-        """Drive the gripper to a normalized opening while holding the current pose. Closing on an object stops early and reports the measured opening; contact does not imply a stable grasp. The target stays in effect during later moves. Returns reached/partial/error, measured pose/opening, residual opening error and environment steps. Example: {"opening":1}.
-
-        Args:
-            opening: Target opening from 0 (closed) to 1 (fully open).
-        """
-        if self.ended:
-            return ToolResult(data={"error": "episode_ended"})
-        self._hold_opening = float(opening)
-        result = self._drive_gripper(opening)
-        result.data["opening"] = round(self._opening(), 3)
-        return result
-
-    def _mobility_state(self):
-        self._refresh_coordinates()
-        return (
-            np.asarray(self._control["mobile_base_xyz"], dtype=float).copy(),
-            Rotation.from_matrix(self._control["mobile_base_rotation"]),
-            self.coordinates.origin.copy(),
-        )
-
-    def _mobile_step(
-        self, velocity=None, lift: float = 0.0, *, check_cancelled: bool = True
-    ) -> None:
-        if check_cancelled:
-            self._check_cancelled()
-        if self.env_steps >= self._max_episode_steps:
-            return
-        native = np.zeros(12)
-        # Track the installed arm goal while the base or lifting support moves.
-        native[-1] = 1
-        start, stop = self._meta["slices"]["base"]
-        native[start:stop] = self._base_velocity(
-            np.zeros(3) if velocity is None else velocity
-        )
-        start, stop = self._meta["slices"]["torso"]
-        native[start:stop] = self._native("torso", np.array([lift]))
-        native[6] = float(np.clip(4 * (self._opening() - self._hold_opening), -1, 1))
-        self.env.step(native)
-        self.env_steps += 1
 
     def _mobility_delta(self, before):
         """Measure translation and signed heading change in the starting chassis frame."""
@@ -682,6 +497,166 @@ class RoboCasaGeneralPrimitives(RoboCasaPrimitives):
         return ToolResult(data=result)
 
 
+class RoboCasaGeneralPrimitives(MeasuredMobileMotion, RoboCasaPrimitives):
+    """Dynamic mounting coordinates with the native grip site, base and lift control."""
+
+    move_to = LiberoRLPrimitives.move_to
+    measure = LiberoRLPrimitives.measure
+    _model_points = LiberoRLPrimitives._model_points
+
+    def _surface_center(self, native: np.ndarray, points: np.ndarray) -> np.ndarray:
+        return np.median(points, axis=0)
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._refresh_coordinates()
+        self._state.save("coordinates.json", self._coordinates_metadata(), step=None)
+
+    def _measure_native(self) -> Measurement:
+        self._control = self.env._client.call("env.coordinate_calibration")
+        return Measurement(
+            np.asarray(self._control["site_xyz"], dtype=np.float64),
+            np.asarray(self._control["site_rotation"], dtype=np.float64),
+            self._opening(),
+        )
+
+    def _tcp_world(self, current: Measurement) -> np.ndarray:
+        return current.xyz
+
+    def _refresh_coordinates(self) -> Measurement:
+        from robots.rl.coordinates import Coordinates, grasp_axes
+
+        native = self._measure_native()
+        coordinates = Coordinates.from_control(self._control)
+        if previous := getattr(self, "coordinates", None):
+            coordinates = coordinates.after(previous)
+        self.coordinates = coordinates
+        self.tool_rotation = grasp_axes(
+            self._control["jaw_slide_axes_site"][0],
+            self._control["wrist_to_site_in_site"],
+        )
+        return Measurement(
+            self.coordinates.points(self._tcp_world(native)),
+            self.coordinates.orientation(native.rotation @ self.tool_rotation),
+            native.opening,
+        )
+
+    def _coordinates_metadata(self) -> dict[str, Any]:
+        metadata = {
+            **self.coordinates.metadata(),
+            "support_surface_kind": self._control.get("support_surface_kind"),
+            "support_surface_source": self._control.get("support_surface_source"),
+            "lift_m": round(float(self._control["lift_m"]), 6)
+            if "lift_m" in self._control
+            else None,
+            "site_world_m": np.asarray(self._control["site_xyz"], dtype=float).tolist(),
+        }
+        if "jaw_slide_axes_site" in self._control:
+            metadata["jaw_slide_axes_site"] = np.asarray(
+                self._control["jaw_slide_axes_site"], dtype=float
+            ).tolist()
+        return metadata
+
+    def robot_state(self) -> dict[str, Any]:
+        measured = self._refresh_coordinates()
+        return {
+            **measured.state(),
+            "finger_gap_m": round(self._finger_gap(), 5),
+            "lift_m": round(float(self._control["lift_m"]), 4),
+            "coordinates": self.coordinates.description(),
+            "env_steps": self.env_steps,
+        }
+
+    def capture(self, camera: str):
+        rgb, depth = self.env.render_camera(camera, depth=True, mask_invalid_depth=True)
+        meta = self.env.get_camera_meta(camera)
+        transform = self.env._client.call(
+            "env.get_camera_transform",
+            kwargs={
+                "camera_name": self.env._resolve_cam(camera),
+                "height": self.env.camera_h,
+                "width": self.env.camera_w,
+            },
+        )
+        depth_arr = np.asarray(depth, dtype=np.float64)
+        near_m = float(meta["depth_near"])
+        far_m = float(meta["depth_far"])
+        valid = (
+            np.isfinite(depth_arr)
+            & (depth_arr > near_m * (1.0 + 1e-4))
+            & (depth_arr < far_m * (1.0 - 1e-5))
+        )
+        safe_depth = np.where(valid, depth_arr, 0.0)
+        rows, cols = np.mgrid[: depth_arr.shape[0], : depth_arr.shape[1]]
+        homogeneous = np.stack(
+            (
+                cols * safe_depth,
+                rows * safe_depth,
+                safe_depth,
+                np.ones_like(safe_depth),
+            ),
+            axis=-1,
+        )
+        world = (homogeneous @ np.asarray(transform, dtype=np.float64).T)[..., :3]
+        world[~valid] = np.nan
+        return (
+            np.asarray(rgb),
+            world,
+            {
+                "pixel_to_world": np.asarray(transform).tolist(),
+                "height": depth_arr.shape[0],
+                "width": depth_arr.shape[1],
+                "intrinsic_K": np.asarray(meta["intrinsic"]).tolist(),
+                "depth_near": near_m,
+                "depth_far": far_m,
+            },
+        )
+
+    @tool
+    def set_gripper(
+        self, opening: Annotated[float, Field(ge=0.0, le=1.0)]
+    ) -> ToolResult:
+        """Drive the gripper to a normalized opening while holding the current pose. Closing on an object stops early and reports the measured opening; contact does not imply a stable grasp. The target stays in effect during later moves. Returns reached/partial/error, measured pose/opening, residual opening error and environment steps. Example: {"opening":1}.
+
+        Args:
+            opening: Target opening from 0 (closed) to 1 (fully open).
+        """
+        if self.ended:
+            return ToolResult(data={"error": "episode_ended"})
+        self._hold_opening = float(opening)
+        result = self._drive_gripper(opening)
+        result.data["opening"] = round(self._opening(), 3)
+        return result
+
+    def _mobility_state(self):
+        self._refresh_coordinates()
+        return (
+            np.asarray(self._control["mobile_base_xyz"], dtype=float).copy(),
+            Rotation.from_matrix(self._control["mobile_base_rotation"]),
+            self.coordinates.origin.copy(),
+        )
+
+    def _mobile_step(
+        self, velocity=None, lift: float = 0.0, *, check_cancelled: bool = True
+    ) -> None:
+        if check_cancelled:
+            self._check_cancelled()
+        if self.env_steps >= self._max_episode_steps:
+            return
+        native = np.zeros(12)
+        # Track the installed arm goal while the base or lifting support moves.
+        native[-1] = 1
+        start, stop = self._meta["slices"]["base"]
+        native[start:stop] = self._base_velocity(
+            np.zeros(3) if velocity is None else velocity
+        )
+        start, stop = self._meta["slices"]["torso"]
+        native[start:stop] = self._native("torso", np.array([lift]))
+        native[6] = float(np.clip(4 * (self._opening() - self._hold_opening), -1, 1))
+        self.env.step(native)
+        self.env_steps += 1
+
+
 class RoboTwinPrimitives(ScenePrimitives):
     """Native planned single-arm waypoint execution."""
 
@@ -735,18 +710,10 @@ class RoboTwinPrimitives(ScenePrimitives):
     def capture(self, camera):
         rgb, depth = self.env.render_camera(camera, depth=True)
         meta = self.env.get_camera_meta(camera)
-        extrinsic = np.asarray(meta["extrinsic_cv"], dtype=float)
-        if extrinsic.shape == (3, 4):
-            extrinsic = np.vstack((extrinsic, [0, 0, 0, 1]))
-        elif extrinsic.shape != (4, 4):
-            raise ValueError("camera extrinsic must be a 3x4 or 4x4 transform")
-        camera_to_world = np.linalg.inv(extrinsic)
-        calibration = {
-            "intrinsic_K": np.asarray(meta["intrinsic_K"]).tolist(),
-            "extrinsic_cam2world": camera_to_world.tolist(),
-            "height": depth.shape[0],
-            "width": depth.shape[1],
-        }
+        calibration = geometry.opencv_calibration(
+            meta["intrinsic_K"], meta["extrinsic_cv"]
+        )
+        calibration.update(height=depth.shape[0], width=depth.shape[1])
         depth = np.asarray(depth, dtype=float)
         world = geometry.world_from_depth(depth, calibration)
         world[~np.isfinite(depth) | (depth <= 0)] = np.nan
