@@ -151,9 +151,7 @@ class Coordinates:
             "contract_version": metadata["contract_version"],
             "frame_version": self.version,
             "orientation": (
-                "fixed-axis XYZ RPY radians relative to the initial base heading"
-                if self.tcp == "native_joint_control"
-                else "fixed-axis XYZ RPY radians; +z follows the pen toward its tip"
+                "fixed-axis XYZ RPY radians; +z follows the pen toward its tip"
                 if self.tcp == "native_tool_tip"
                 else "fixed-axis XYZ RPY radians; tool +x closes the jaws, +z approaches"
             ),

@@ -611,7 +611,7 @@ def configure_planner(planner, config: RunConfig):
     from robots.rl.history import HistoryRetention
 
     planner.capabilities_factory = lambda toolkit, system, user, turns: [
-        WorkflowCapability(toolkit, system),
+        WorkflowCapability(toolkit),
         HistoryRetention(toolkit),
     ]
     return planner

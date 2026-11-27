@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from copy import deepcopy
 from dataclasses import replace
@@ -226,17 +225,7 @@ def argument_hint(
 ) -> str:
     """Short actionable model feedback, independently of validator formatting."""
     if name == "execute_actions" and declaration is not None:
-        joint = declaration.input_schema.get("$defs", {}).get("JointDrive")
-        if joint is None:
-            return declaration.description
-        count = joint["properties"]["values"]["minItems"]
-        template = {
-            "actions": [{"action": "drive_joints", "values": [0] * count, "steps": 1}]
-        }
-        return (
-            f"Supply exactly {count} values in action_order. Replace entries in this "
-            f"valid zero-delta template to command movement: {json.dumps(template)}"
-        )
+        return declaration.description
     if environment == "robotwin" and name in {"move_to", "set_gripper"}:
         return "Follow the declared native action fields and orientation convention; include the selected arm where required."
     if environment == "robocasa" and name in {"move_to", "set_gripper"}:

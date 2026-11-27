@@ -72,21 +72,17 @@ For ManiSkill, pass the registered Gymnasium task ID, for example
 ``bash tools/rl/run.sh --simulator maniskill --task-name TwoRobotPickCube-v1 --seed 0``.
 For arms, the opening observation includes the measured TCP pose. Use
 ``move_to`` and ``set_gripper`` for a grasping arm, select the arm on a
-two-arm robot, or use ``move_to`` for a drawing tip. Locomotion, balancing
-and independent-finger robots expose ``drive_joints`` through the same
-``execute_actions`` tool. Follow the joint order in the observation and
-supply the normalized control values and the number of control steps.
+two-arm robot, or use ``move_to`` for a drawing tip.
 
 The environment uses the task's registered episode horizon. Policy cameras
 render at 512 × 512. The video includes the initial image and one image per
-native control step, encoded at 20 fps. Tasks without a policy camera use
-a spectator view for the video and measured state for the policy.
+native control step, encoded at 20 fps.
 SAM3 is optional. An episode reports its native return and the task's success
 criterion when defined. A missing success criterion is recorded as JSON ``null``.
 
-To verify the integration for every registered task on the simulator host, run
+To verify the integration for each supported pose task on the simulator host, run
 ``RPENT_RUN_MANISKILL_INTEGRATION=1 python -m pytest -v tests/e2e_tests/maniskill/test_environment_smoke.py``.
-Each case resets the task, reads its policy cameras and issues a robot-specific action through RPent. Unmapped embodiments are reported as skips.
+Each case resets the task, reads its policy cameras and issues a robot-specific action through RPent.
 
 Serve training tools
 --------------------

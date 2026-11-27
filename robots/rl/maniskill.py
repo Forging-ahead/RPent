@@ -16,10 +16,11 @@ from robots.rl.maniskill_arm import (
     ManiSkillArm,
     UnsupportedRobotPolicy,
     floating_hand,
+    _normalize_target,
     g1_arms,
     transform,
 )
-from robots.rl.maniskill_joints import JOINT_ROBOTS, ManiSkillJointDrive
+from robots.rl.maniskill_task_hints import TASK_HINTS
 from robots.rl.perception import RecordedPerception
 from robots.rl.tools import ControlConfig
 from rpent.session import EnvState
@@ -46,12 +47,15 @@ def _make_env(
     from mani_skill.utils import common
     from mani_skill.utils.registration import REGISTERED_ENVS
     from omegaconf import OmegaConf
+    from rlinf.agents.rpent.maniskill_tasks import CARTESIAN_TASKS
     from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
     from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
         resolve_maniskill_task_descriptions,
     )
 
     env_id = "PickCube-v1" if task_name == "pick_cube" else task_name
+    if env_id not in CARTESIAN_TASKS:
+        raise ValueError(f"Unsupported ManiSkill pose task: {env_id}")
     if env_id not in REGISTERED_ENVS:
         raise ValueError(f"Unknown ManiSkill task {env_id!r}")
     spec = REGISTERED_ENVS[env_id]
@@ -177,34 +181,29 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
             self.terminated = self.truncated = False
             native = self.env.unwrapped
             group = getattr(native.agent, "agents_dict", None)
-            self.joint_drive = None
             self.agent_keys = None
             self._mount_forward_axis = 0
             if group is not None:
-                if (
-                    len(group) != 2
-                    or not hasattr(native, "left_agent")
-                    or not hasattr(native, "right_agent")
-                ):
+                agents = {
+                    side: getattr(native, f"{side}_agent", None)
+                    for side in ("left", "right")
+                }
+                if len(group) != 2 or any(agent is None for agent in agents.values()):
                     raise UnsupportedRobotPolicy(
                         f"{self.env_id} needs a physical arm mapping"
                     )
                 self.arms = {
-                    side: ManiSkillArm(self, getattr(native, f"{side}_agent"))
-                    for side in ("left", "right")
+                    side: ManiSkillArm(self, agent) for side, agent in agents.items()
                 }
                 self.agent_keys = {
-                    side: next(k for k, v in group.items() if v is arm.agent)
-                    for side, arm in self.arms.items()
+                    side: next(key for key, member in group.items() if member is agent)
+                    for side, agent in agents.items()
                 }
             elif native.agent.uid in {
                 "unitree_g1_simplified_upper_body",
                 "unitree_g1_simplified_upper_body_with_head_camera",
             }:
                 self.arms = g1_arms(self, native.agent)
-            elif native.agent.uid in JOINT_ROBOTS:
-                self.joint_drive = ManiSkillJointDrive(native.agent)
-                self.arms = {}
             elif native.agent.uid == "floating_ability_hand_right":
                 self.arms = {"arm": floating_hand(self, native.agent)}
                 # The floating hand's fixed root has its +X axis pointing down.
@@ -264,6 +263,22 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
                     "carry the cube centre directly to goal.xyz and hold it still "
                     "with the gripper closed."
                 )
+            elif self.env_id == "StackCube-v1":
+                self.task += (
+                    " The wrist starts pointing down in a clear hover. "
+                    "Keep that orientation and move directly to the red cube centre, "
+                    "half its height above the table. Close, then plan a single carry "
+                    "that clears the green cube before the cubes overlap. Align the "
+                    "red cube centre over the green top, accounting for any offset "
+                    "from the gripper, and open immediately with time left for settling. "
+                    "For gaps over 15 cm, budget release before carrying. On a clear path, "
+                    "batch one diagonal move_to to the release pose followed by set_gripper "
+                    "with opening 1. The diagonal itself raises the cube during transfer. "
+                    f"The full sequence has {self.env.cfg.init_params.max_episode_steps} "
+                    "environment steps."
+                )
+            if hint := TASK_HINTS.get(self.env_id):
+                self.task += " " + hint
         except BaseException:
             self.env.close()
             raise
@@ -293,8 +308,6 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         }
 
     def robot_state(self) -> dict:
-        if self.joint_drive is not None:
-            return self.joint_drive.state(self._obs)
         states = {}
         for name, arm in self.arms.items():
             measured = arm.measure().state()
@@ -319,9 +332,6 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         return state
 
     def _refresh_coordinates(self):
-        if self.joint_drive is not None:
-            self.coordinates = self.joint_drive.coordinates
-            return
         mounts = [transform(arm.mount.pose) for arm in self.arms.values()]
         if self.dual_arm:
             origin, rotation = dual_arm_mount(mounts[0][:3, 3], mounts[1][:3, 3])
@@ -344,9 +354,6 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
     def set_gripper(self, *, opening, arm="arm"):
         return self.arms[arm].set_gripper(opening=opening)
 
-    def drive_joints(self, *, values, steps=1):
-        return self.joint_drive.drive(self, values, steps)
-
     def _mobility_state(self):
         from scipy.spatial.transform import Rotation
 
@@ -365,10 +372,7 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         delta = np.zeros(arm.parts["body"]._original_single_action_space.shape)
         delta[self._lift_index] = lift
         for name, target in (("base", twist), ("body", delta)):
-            space = arm.parts[name]._original_single_action_space
-            command[arm.slices[name]] = (
-                2 * (target - space.low) / (space.high - space.low) - 1
-            )
+            command[arm.slices[name]] = _normalize_target(arm.parts[name], target)
         arm.last = command
         self.step_controllers(check_cancelled=check_cancelled)
 
@@ -378,9 +382,7 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
         if self.ended:
             raise RuntimeError("ManiSkill episode has ended")
         # Explicit batch dimensions remain valid after an official control-mode switch.
-        if self.joint_drive is not None:
-            action = self.joint_drive.last[None, :]
-        elif self.agent_keys is not None:
+        if self.agent_keys is not None:
             action = {
                 self.agent_keys[k]: arm.last[None, :] for k, arm in self.arms.items()
             }
@@ -399,13 +401,6 @@ class ManiSkillPrimitives(MeasuredMobileMotion, RecordedPerception):
     def _record_video_frame(self):
         if self.cameras:
             self.frames.append(self._obs["sensor_data"][self.cameras[0]]["rgb"].copy())
-        else:
-            # State-only tasks have no policy RGB. Keep spectator renders in the MP4.
-            render = getattr(self.env.unwrapped, "render_rgb_array", None)
-            if render is not None:
-                rgb = render()
-                if rgb is not None:
-                    self.frames.append(np.asarray(rgb[0].cpu()).copy())
 
     def _record_status(self):
         if self.env_steps == 0 and not self.frames:

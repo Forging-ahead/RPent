@@ -17,7 +17,7 @@ if os.environ.get("RPENT_RUN_MANISKILL_INTEGRATION") != "1":
 import mani_skill.envs  # noqa: E402, F401 - populates the native registry
 from mani_skill.utils.registration import REGISTERED_ENVS  # noqa: E402
 
-from robots.rl.maniskill_arm import UnsupportedRobotPolicy  # noqa: E402
+from rlinf.agents.rpent.maniskill_tasks import CARTESIAN_TASKS  # noqa: E402
 from robots.rl.rl_episode import parse_args, start_environment  # noqa: E402
 from rpent.utils.logging import init_output_dir  # noqa: E402
 
@@ -39,22 +39,10 @@ def open_episode(tmp_path):
         yield start
 
 
-def test_pick_cube_uses_rlinf_env():
-    from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
-
-    from robots.rl.maniskill import _make_env
-
-    env, task = _make_env("PickCube-v1", None, 1, seed=7)
-    with contextlib.closing(env):
-        assert task == "PickCube-v1"
-        assert isinstance(env, ManiskillEnv)
-        assert env.seed == 7
-        obs, _ = env.reset()
-        assert obs["sensor_data"]["base_camera"]["rgb"].shape == (512, 512, 3)
-        _, reward, _, truncated, info = env.step(env.action_space.sample())
-        assert bool(truncated)
-        assert int(info["episode"]["episode_len"]) == 1
-        assert float(info["episode"]["return"]) == pytest.approx(float(reward))
+@pytest.mark.parametrize("env_id", ["MS-CartpoleBalance-v1", "AnymalC-Reach-v1", "RotateValveLevel0-v1"])
+def test_excluded_tasks_rejected_before_simulation(env_id, open_episode):
+    with pytest.raises(ValueError, match="Unsupported ManiSkill pose task"):
+        open_episode(env_id)
 
 
 def test_pick_cube_reports_native_goal_in_the_planner_frame(open_episode):
@@ -78,8 +66,6 @@ def test_pick_cube_reports_native_goal_in_the_planner_frame(open_episode):
         "DrawTriangle-v1",
         "DrawSVG-v1",
         "FMBAssembly1Easy-v1",
-        "UnitreeG1Stand-v1",
-        "UnitreeH1Stand-v1",
     ],
 )
 def test_native_boolean_reward_environment(env_id):
@@ -101,7 +87,7 @@ def test_fetch_base_and_lift_use_effective_episode_budget(tmp_path, horizon):
 
     init_output_dir(tmp_path)
     sim = ManiSkillPrimitives(
-        task_name="SceneManipulation-v1",
+        task_name="OpenCabinetDrawer-v1",
         seed=0,
         state=EnvState(tmp_path),
         check_cancelled=lambda: None,
@@ -185,22 +171,24 @@ def test_cartesian_tools_on_native_joint_controllers(env_id, open_episode):
             np.testing.assert_allclose(state[other]["pose"]["xyz"], held, atol=0.3)
 
 
-@pytest.mark.parametrize("env_id", sorted(REGISTERED_ENVS))
+@pytest.mark.parametrize("env_id", sorted(CARTESIAN_TASKS))
 def test_native_environment_through_episode_entrypoint(
     env_id, open_episode, monkeypatch
 ):
     """Exercise the same tools and task routing used by RLinf's episode worker."""
     # A one-step registered horizon exercises native truncation inside this test only.
     monkeypatch.setattr(REGISTERED_ENVS[env_id], "max_episode_steps", 1)
-    try:
-        toolkit = open_episode(env_id)
-    except UnsupportedRobotPolicy as exc:
-        # Report unmapped embodiments separately from native installation or controller failures.
-        if "no mapped arm" in str(exc):
-            pytest.skip(str(exc))
-        raise
+    toolkit = open_episode(env_id, seed=7 if env_id == "PickCube-v1" else 0)
     opening = toolkit.initial_observation().data
     caps = opening["sensors"]
+    env = toolkit._primitives.env
+    if env_id == "PickCube-v1":
+        from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
+
+        assert isinstance(env, ManiskillEnv)
+        assert env.seed == 7
+        rgb = toolkit._primitives._obs["sensor_data"]["base_camera"]["rgb"]
+        assert rgb.shape == (512, 512, 3)
     tools = {definition.name for definition in toolkit.list_tools()}
     assert ("view_env" in tools) == bool(caps["rgb_cameras"])
     assert ("back_project" in tools) == bool(caps["depth_cameras"])
@@ -209,25 +197,20 @@ def test_native_environment_through_episode_entrypoint(
         assert len(response.images) == 1, response.data
 
     state = opening["state"]
-    if "joint_control" in caps:
-        count = len(caps["joint_control"]["action_order"])
-        move = {"action": "drive_joints", "values": [0.25] * count}
-        invalid = {**move, "values": [0] * (count + 1)}
-        rejected = toolkit.execute_tool("execute_actions", {"actions": [move, invalid]})
-        assert "error" in rejected.data and toolkit._primitives.env_steps == 0
-    else:
-        pose = state["left"]["pose"] if caps["dual_arm"] else state["pose"]
-        x, y, z = pose["xyz"]
-        move = {"action": "move_to", "xyz": [x, y, z + 2]}
-        if caps["dual_arm"]:
-            move["arm"] = "left"
+    pose = state["left"]["pose"] if caps["dual_arm"] else state["pose"]
+    x, y, z = pose["xyz"]
+    move = {"action": "move_to", "xyz": [x, y, z + 2]}
+    if caps["dual_arm"]:
+        move["arm"] = "left"
     actions = [move, move]
     outcome = toolkit.execute_tool("execute_actions", {"actions": actions})
     assert outcome.data.get("executed_count") == 1, outcome.data
-    if "joint_control" in caps:
-        assert outcome.data["final_state"]["joint_position"] != state["joint_position"]
     metrics = toolkit.native_outcome()
     assert metrics["terminated"] or metrics["truncated"]
     assert metrics["success"] is None or type(metrics["success"]) is bool
     assert math.isfinite(metrics["episode_return"])
-    assert toolkit.state.latest_record().extras["env_steps"] == 1
+    record = toolkit.state.latest_record()
+    assert record.extras["env_steps"] == 1
+    assert record.extras["episode_return"] == pytest.approx(record.extras["reward"])
+    if env_id == "PickCube-v1":
+        assert metrics["truncated"]

@@ -17,51 +17,23 @@
 from __future__ import annotations
 
 import time
-from dataclasses import replace
 
 from pydantic_ai import ModelRetry, ToolCallPart
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UnexpectedModelBehavior
-from pydantic_ai.messages import ModelRequest, SystemPromptPart
 
 
 class WorkflowCapability(AbstractCapability):
     """Validate complete replies before executing any tool."""
 
-    def __init__(self, toolkit, system_prompt=None) -> None:
+    def __init__(self, toolkit) -> None:
         self.toolkit = toolkit
-        self.original_prompt = system_prompt
-        self.joint_prompt = None
-        if (getattr(toolkit, "tool_capabilities", None) or {}).get("joint_control"):
-            from robots.rl.prompt_bundle import joint_prompt
-
-            self.joint_prompt = joint_prompt(toolkit)
         self.allowed = {item.name: item for item in toolkit.list_tools()}
         self.stats = toolkit.workflow_stats
         self.stats.update(invalid_tool_responses=0, model_seconds=0.0)
 
     async def before_model_request(self, ctx, request_context):
         """Allow a final reply or a single validated tool call."""
-        if self.joint_prompt is not None:
-            # The CLI and Dashboard render the generic prompt before the simulator starts.
-            # Replace that specific prompt in the request view after capability negotiation.
-            for index, message in enumerate(request_context.messages):
-                if isinstance(message, ModelRequest) and any(
-                    isinstance(part, SystemPromptPart)
-                    and part.content == self.original_prompt
-                    for part in message.parts
-                ):
-                    request_context.messages[index] = replace(
-                        message,
-                        parts=[
-                            replace(part, content=self.joint_prompt)
-                            if isinstance(part, SystemPromptPart)
-                            and part.content == self.original_prompt
-                            else part
-                            for part in message.parts
-                        ],
-                    )
-                    break
         request_context.model_settings = {
             **(request_context.model_settings or {}),
             "parallel_tool_calls": False,
@@ -70,19 +42,13 @@ class WorkflowCapability(AbstractCapability):
 
         prepared = request_context.model_request_parameters
         definitions = [*prepared.function_tools, *prepared.output_tools]
-        joint_only = (
-            self.joint_prompt is not None
-            and len(definitions) == 1
-            and definitions[0].name == "execute_actions"
-        )
-        bounded = is_qwen_model(getattr(request_context.model, "model_name", "")) and (
-            joint_only
-            or any(
-                t.parameters_json_schema.get("type") == "object"
-                and not t.parameters_json_schema.get("required")
-                and t.parameters_json_schema.get("additionalProperties") is False
-                for t in definitions
-            )
+        bounded = is_qwen_model(
+            getattr(request_context.model, "model_name", "")
+        ) and any(
+            t.parameters_json_schema.get("type") == "object"
+            and not t.parameters_json_schema.get("required")
+            and t.parameters_json_schema.get("additionalProperties") is False
+            for t in definitions
         )
         if bounded:
             from robots.rl.qwen_grammar import bounded_tool_format

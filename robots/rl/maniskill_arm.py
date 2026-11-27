@@ -20,6 +20,11 @@ def _index(link):
     return int(np.asarray(link.index).item())
 
 
+def _normalize_target(controller, target):
+    space = controller._original_single_action_space
+    return 2 * (target - space.low) / (space.high - space.low) - 1
+
+
 class UnsupportedRobotPolicy(ValueError):
     """The registered robot lacks a public RPent action for this embodiment."""
 
@@ -250,8 +255,7 @@ class ManiSkillArm(CartesianServo):
         else:
             ctrl = self.gripper
             if ctrl.config.normalize_action:
-                space = ctrl._original_single_action_space
-                q = 2 * (q - space.low) / (space.high - space.low) - 1
+                q = _normalize_target(ctrl, q)
             action[self.slices["gripper"]] = q
 
     def _step(self, action):

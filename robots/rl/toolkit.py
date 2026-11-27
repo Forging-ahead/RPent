@@ -68,7 +68,6 @@ def episode_tools(
     from robots.rl.actions import (
         ActionBatch,
         DualArmBatch,
-        JointBatch,
         MobileBatch,
         ToolTipBatch,
     )
@@ -76,47 +75,31 @@ def episode_tools(
     from robots.rl.units import model_tool
 
     owner = RecordedPerception if perception is None else perception
-    if environment == "maniskill":
-        rgb, depth = capabilities["rgb_cameras"], capabilities["depth_cameras"]
-        views = []
-        if rgb:
-            views.append((owner.view_env, rgb))
-            if capabilities["segment"]:
-                views.append((owner.segment, rgb))
-        if depth:
-            views.append((owner.back_project, depth))
-        batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
-        if capabilities.get("joint_control"):
-            batch_type = JointBatch
-        elif capabilities.get("mobile"):
-            batch_type = MobileBatch
-        elif not capabilities["gripper"]:
-            batch_type = ToolTipBatch
-    else:
-        cameras = CAMERAS[environment]
-        views = [
-            (tool, cameras)
-            for tool in (owner.view_env, owner.segment, owner.back_project)
-        ]
+    if environment != "maniskill":
+        rgb = depth = CAMERAS[environment]
+        segment = True
         batch_type = {
             "libero": ActionBatch,
             "robocasa": MobileBatch,
             "robotwin": DualArmBatch,
             "robodojo": DualArmBatch,
         }[environment]
+    else:
+        rgb, depth = capabilities["rgb_cameras"], capabilities["depth_cameras"]
+        segment = capabilities["segment"]
+        if capabilities.get("mobile"):
+            batch_type = MobileBatch
+        elif not capabilities["gripper"]:
+            batch_type = ToolTipBatch
+        else:
+            batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
     batch = batch_type(toolkit).execute_actions
     schema = batch.input_schema
-    if environment == "maniskill" and capabilities.get("mobile"):
-        lateral = schema["$defs"]["BaseMove"]["properties"]["vy"]
-        lateral.update(
+    if environment == "maniskill" and batch_type is MobileBatch:
+        schema["$defs"]["BaseMove"]["properties"]["vy"].update(
             minimum=0,
             maximum=0,
             description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
-        )
-    if environment == "maniskill" and capabilities.get("joint_control"):
-        count = len(capabilities["joint_control"]["action_order"])
-        schema["$defs"]["JointDrive"]["properties"]["values"].update(
-            minItems=count, maxItems=count
         )
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
@@ -124,7 +107,13 @@ def episode_tools(
         _input_schema=schema,
         description=batch.description.replace("1..K", f"1..{max_actions}"),
     )
-    for declaration, cameras in [*views, (batch, ())]:
+    camera_tools = (
+        ("view_env", rgb),
+        ("segment", rgb if segment else ()),
+        ("back_project", depth),
+    )
+    tools = [(getattr(owner, name), cameras) for name, cameras in camera_tools if cameras]
+    for declaration, cameras in (*tools, (batch, ())):
         yield model_tool(
             strict_tool(
                 coordinate_definition(declaration),
@@ -183,8 +172,6 @@ class RLToolkit(Toolkit):
                     "mobile": bool(getattr(native, "mobile", False)),
                     "gripper": native.has_gripper,
                 }
-                if getattr(native, "joint_drive", None) is not None:
-                    self.tool_capabilities["joint_control"] = native.joint_drive.layout
             else:
                 if environment in {"libero", "robocasa"} and image_size != NATIVE_SIZE:
                     native.display_size = image_size
