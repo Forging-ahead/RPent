@@ -14,6 +14,14 @@
 
 """Unified RL simulator interface, warm pool server, and standalone rollout."""
 
-from robots.rl.toolkit import RLToolkit, episode_tools, render_prompts
+from typing import Any
 
 __all__ = ["RLToolkit", "episode_tools", "render_prompts"]
+
+
+def __getattr__(name: str) -> Any:
+    if name in __all__:
+        from robots.rl import toolkit
+
+        return getattr(toolkit, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -322,6 +322,41 @@ class RoboLabEpisodeEnvFacade(MainThreadServeMixin, RpcFacade):
         return self.get_motion_state()
 
 
+def _install_contact_object_guard() -> None:
+    """Filter phantom ``contact_object_list`` names absent from the USD scene.
+
+    Some upstream RoboLab tasks (e.g. ``WhiteMugInCenterOfTableTask``) declare
+    contact objects not present in their ``.usda`` scene, causing
+    ``create_contact_sensors`` to raise ``AttributeError`` on session open.
+    """
+    from robolab.core.environments import config as robolab_cfg_mod
+    from robolab.core.sensors import contact_sensor_utils
+
+    orig = contact_sensor_utils.create_contact_sensors
+    if getattr(orig, "_rpent_sanitized", False):
+        return
+
+    def _safe_create_contact_sensors(env_cfg):
+        objs = getattr(env_cfg, "contact_object_list", None)
+        scene = getattr(env_cfg, "scene", None)
+        if objs and scene is not None:
+            missing = [name for name in objs if not hasattr(scene, name)]
+            if missing:
+                logger.warning(
+                    "RoboLab task %s declares missing scene contact objects %s; skipping them",
+                    getattr(env_cfg, "_task_name", type(env_cfg).__name__),
+                    missing,
+                )
+                env_cfg.contact_object_list = [
+                    name for name in objs if hasattr(scene, name)
+                ]
+        return orig(env_cfg)
+
+    _safe_create_contact_sensors._rpent_sanitized = True  # type: ignore[attr-defined]
+    contact_sensor_utils.create_contact_sensors = _safe_create_contact_sensors
+    robolab_cfg_mod.create_contact_sensors = _safe_create_contact_sensors
+
+
 class RoboLabEpisodeRuntime:
     """Own one Isaac application and rebuild the native scene for each episode."""
 
@@ -385,6 +420,7 @@ class RoboLabEpisodeRuntime:
                 save_dir = Path(self._scratch.name)
             save_dir.mkdir(parents=True, exist_ok=True)
             set_output_dir(str(save_dir))
+            _install_contact_object_guard()
             auto_register_droid_abs_ik_envs(task=task)
             cfg = parse_env_cfg(
                 task, device="cuda:0", seed=seed, num_envs=1, use_fabric=True

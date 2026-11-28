@@ -61,3 +61,44 @@ def test_worker_reuses_runtime_and_closes_each_scene(monkeypatch, tmp_path):
         ("scene",),
         ("shutdown",),
     ]
+
+
+def test_contact_object_guard_strips_missing_scene_attributes(monkeypatch):
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    seen = []
+
+    def fake_create_contact_sensors(env_cfg):
+        seen.append(list(env_cfg.contact_object_list))
+        for name in env_cfg.contact_object_list:
+            assert hasattr(env_cfg.scene, name)
+
+    fake_csu = ModuleType("robolab.core.sensors.contact_sensor_utils")
+    fake_csu.create_contact_sensors = fake_create_contact_sensors
+    fake_cfg = ModuleType("robolab.core.environments.config")
+    fake_cfg.create_contact_sensors = fake_create_contact_sensors
+
+    for mod_name, mod_obj in (
+        ("robolab", ModuleType("robolab")),
+        ("robolab.core", ModuleType("robolab.core")),
+        ("robolab.core.sensors", ModuleType("robolab.core.sensors")),
+        ("robolab.core.sensors.contact_sensor_utils", fake_csu),
+        ("robolab.core.environments", ModuleType("robolab.core.environments")),
+        ("robolab.core.environments.config", fake_cfg),
+    ):
+        monkeypatch.setitem(sys.modules, mod_name, mod_obj)
+    sys.modules["robolab.core.sensors"].contact_sensor_utils = fake_csu
+    sys.modules["robolab.core.environments"].config = fake_cfg
+
+    episode_server._install_contact_object_guard()
+    episode_server._install_contact_object_guard()  # idempotent
+
+    env_cfg = SimpleNamespace(
+        _task_name="WhiteMugInCenterOfTableTask",
+        scene=SimpleNamespace(mug=object(), table=object()),
+        contact_object_list=["mug", "bowl", "table", "banana"],
+    )
+    fake_cfg.create_contact_sensors(env_cfg)
+    assert env_cfg.contact_object_list == ["mug", "table"]
+    assert seen == [["mug", "table"]]

@@ -1,0 +1,135 @@
+# Example dedicated 8x H100 (80GB) 4-Env + 8x SAM3 SFT Data-Collection node template.
+# Designed for high-throughput Harness v2 trajectory collection across:
+#   libero + robotwin + robolab + metaworld (no RoboDojo).
+#
+# Launch on each dedicated simulator node (e.g. one node for local Qwen3.8-27B,
+# a second identical node for remote DeepSeek-V4.1-Flash = 416 total slots):
+#   ulimit -n 1048576
+#   PYTHONPATH=/path/to/rpent_ppo/repos/RPent \
+#     python /path/to/rpent_ppo/repos/RPent/tools/rl/serve.py \
+#     --config /path/to/sim_services_4env_sft_h100.yaml
+#
+# Capacity & VRAM budget (208 concurrent slots + 8 SAM3 across 8x 80GB H100):
+# - Per GPU: 8 LIBERO + 6 RoboTwin + 4 RoboLab + 8 MetaWorld + 1 SAM3
+# - Removing RoboDojo frees 2 IsaacSim workers/GPU, allowing 4 RoboLab workers/GPU
+#   (32 RoboLab total/node, ~46-50 GiB IsaacSim VRAM + ~2.5 GiB SAM3 + ~6-8 GiB
+#   MuJoCo/SAPIEN = ~58-62 GiB / 81.5 GiB per H100, leaving ~20 GiB headroom).
+#
+# Pre-flight requirements on air-gapped clusters:
+# 1. Verify all 8 GPUs pass simultaneous Vulkan SimulationApp startup before assigning
+#    a node as a simulator host (avoid GPUs with VkResult: ERROR_DEVICE_LOST).
+# 2. Install /root/.nvidia-omniverse/config/omniverse.toml mapping S3 Nucleus URLs
+#    to your local offline /path/to/rpent_ppo/assets/isaac_nucleus/ mirror.
+# 3. Never prepend /usr/local/cuda/compat into simulator LD_LIBRARY_PATH, and scope
+#    RLinf strictly to simulators.libero.env.PYTHONPATH.
+
+host: 0.0.0.0
+log_dir: /path/to/rpent_ppo/logs/sim_services_4env_sft
+
+env:
+  LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64
+  PYTHONPATH: /path/to/rpent_ppo/repos/RPent
+  CUDA_DEVICE_ORDER: PCI_BUS_ID
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  NO_PROXY: 127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12
+  no_proxy: 127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+
+sam3:
+  python: /path/to/rpent_ppo/envs/sam3/bin/python
+  checkpoint: /path/to/rpent_ppo/models/sam3/sam3.pt
+  host: 127.0.0.1
+  backend_host: 127.0.0.1
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  backend_base_port: 28500
+  pool_port: 28520
+  max_pending: 2048
+  timeout_s: 600
+
+simulators:
+  libero:
+    python: /path/to/rpent_ppo/envs/libero/bin/python
+    host: 0.0.0.0
+    port: 28561
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+    workers: 64
+    libero_type: pro
+    sam3_endpoint: http://127.0.0.1:28520
+    sam3_timeout_s: 600
+    max_episodes_per_worker: 40
+    max_concurrent_spawns: 8
+    sleepable: false
+    env:
+      PYTHONPATH: /path/to/rpent_ppo/repos/RPent:/path/to/rpent_ppo/repos/RLinf
+      LIBERO_CONFIG_PATH: /path/to/rpent_ppo/assets/libero-config
+      ROBOT_PLATFORM: LIBERO
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+
+  robotwin:
+    python: /path/to/rpent_ppo/envs/robotwin/bin/python
+    host: 0.0.0.0
+    port: 28562
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+    workers: 48
+    assets_path: /path/to/rpent_ppo/assets/robotwin
+    sam3_endpoint: http://127.0.0.1:28520
+    sam3_timeout_s: 600
+    max_episodes_per_worker: 40
+    max_concurrent_spawns: 8
+    sleepable: false
+    env:
+      ROBOTWIN_ASSETS_PATH: /path/to/rpent_ppo/assets/robotwin
+      VK_ICD_FILENAMES: /etc/vulkan/icd.d/nvidia_icd.json
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+
+  robolab:
+    python: /path/to/rpent_ppo/envs/robolab/bin/python
+    host: 0.0.0.0
+    port: 28564
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+    workers: 32
+    sam3_endpoint: http://127.0.0.1:28520
+    sam3_timeout_s: 600
+    max_episodes_per_worker: 30
+    max_concurrent_spawns: 4
+    sleepable: false
+    env:
+      OMNI_KIT_ACCEPT_EULA: Y
+      ACCEPT_EULA: Y
+      PRIVACY_CONSENT: Y
+      VK_ICD_FILENAMES: /etc/vulkan/icd.d/nvidia_icd.json
+      RPENT_ISAAC_KIT_ARGS: >-
+        --/rtx/verifyDriverVersion/enabled=false
+        --/ngx/enabled=false
+        --/rtx/post/aa/op=0
+        --/rtx-transient/dlssg/enabled=false
+        --/app/extensions/registryEnabled=false
+        --/persistent/isaac/asset_root/default=/path/to/rpent_ppo/assets/isaac_nucleus/Assets/Isaac/5.0
+        --/persistent/isaac/asset_root/cloud=/path/to/rpent_ppo/assets/isaac_nucleus/Assets/Isaac/5.0
+        --/persistent/isaac/asset_root/nvidia=/path/to/rpent_ppo/assets/isaac_nucleus/Assets/Isaac/5.0
+
+  metaworld:
+    python: /path/to/rpent_ppo/envs/metaworld/bin/python
+    host: 0.0.0.0
+    port: 28565
+    gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+    workers: 64
+    sam3_endpoint: http://127.0.0.1:28520
+    sam3_timeout_s: 600
+    max_episodes_per_worker: 40
+    max_concurrent_spawns: 8
+    sleepable: false
+    env:
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl

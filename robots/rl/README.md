@@ -30,6 +30,7 @@ robots/rl/server.py  (FastAPI + SimPoolManager / SimPoolRouter over Unix-socket 
    A single YAML file supervises the SAM3 GPU pool and one warm `SimPoolManager` per simulator, each running under its own isolated Python venv (`envs/sam3`, `envs/libero`, `envs/robotwin`, `envs/robodojo`, `envs/robolab`, `envs/metaworld`). Reference templates:
    - `tools/rl/sim_services.example.yaml` — single-node 8-GPU layout (GPUs 0–3 RL, GPUs 4–7 sims + SAM3).
    - `tools/rl/sim_services_5env_h100.example.yaml` — dedicated 8× 80 GB H100 5-Env + 8× SAM3 node (`144` concurrent slots) paired with 6-node 27B Async GRPO.
+   - `tools/rl/sim_services_4env_sft_h100.example.yaml` — dedicated 8× 80 GB H100 4-Env + 8× SAM3 SFT collection node (`208` concurrent slots across `libero`, `robotwin`, `robolab`, `metaworld`).
    - `tools/rl/sim_services_48gpu.example.yaml` — multi-node `SimPoolRouter` + sleepable collocated pools layout.
 2. **Full-concurrency warm worker pools with crash detection & retry**:
    Each `SimPoolManager` pre-warms `workers` processes pinned round-robin across configured GPUs, matches handshakes by explicit `--worker-id`, exposes `workers_target` / `workers_total` / `workers_idle` / `active_sessions` on `GET /health`, polls `proc.poll()` every `0.5s` during startup to catch transient simulator crashes immediately (retrying up to `3×`), and guards `_replace_worker()` with an idempotent `replaced` flag so concurrent cohort aborts never leak or double-respawn workers.
@@ -133,9 +134,13 @@ RPENT_RUN_ROBOLAB_INTEGRATION=1 RPENT_ROBOLAB_GPU=4 \
   /path/to/envs/robolab/bin/python -m pytest -s -q tests/e2e_tests/robolab
 ```
 
-## Standalone Evaluation / Data Collection
+## Standalone Evaluation & SFT Data Collection
 
-Run standalone episodes against any OpenAI-compatible serving endpoint (e.g. SGLang or vLLM) with the same Harness v2 conversation, dynamic compaction, and binary transport:
+Run standalone episodes or large-scale resumable SFT trajectory collection against any OpenAI-compatible serving endpoint (local SGLang continuous-batching replicas or remote APIs) with the exact same Harness v2 conversation, dynamic compaction, and binary transport.
+
+See the full teammate guide in **[`SFT_DATA_COLLECTION.md`](./SFT_DATA_COLLECTION.md)** for multi-node dual-teacher collection, interrupt/resume, sharding, `robots/rl/sft_export.py` (`ms-swift` / `Qwen3.5-4B` format verification), and `swift sft` training flags.
+
+Quick example:
 
 ```bash
 python -m robots.rl.rollout \
@@ -146,10 +151,11 @@ python -m robots.rl.rollout \
   --output-dir /path/to/eval_out \
   --concurrency 8 \
   --max-turns 50 \
+  --max-tokens 16384 \
   --context-management dynamic \
   --include-jaw-mm \
   --request-timeout-s 1200 \
-  --record-artifacts
+  --resume
 ```
 
 ## Multi-Node Routers & Sleepable Collocated Pools
@@ -173,6 +179,7 @@ For topologies that aggregate simulator pools across multiple hosts or collocate
 | **IsaacSim cold-start segfault stalls `SimPoolManager.start()` for `240s`** | Waiting solely on the readiness future missed immediate child exits. | `robots/rl/server.py` polls `proc.poll()` every `0.5s` for immediate crash detection and retries failed spawns up to `3×`. |
 | **Single-GPU Vulkan `VkResult: ERROR_DEVICE_LOST` (`EXIT=139`)** | A GPU with a wedged Vulkan driver state can still pass CUDA/NCCL/EGL checks while crashing every `SimulationApp` launch. | Pre-flight all 8 GPUs with simultaneous `SimulationApp` checks; keep Vulkan-faulty nodes on pure CUDA RL and assign only 8/8 Vulkan-healthy nodes to IsaacSim pools. |
 | **Dedicated 5-Env simulator node OOMs when oversubscribing IsaacSim workers** | Each active IsaacSim worker (`robodojo` / `robolab`) peaks at `~11.5–12.5 GiB` VRAM. | Cap IsaacSim at `4` workers/GPU (`16 RoboDojo + 16 RoboLab` staggered across 8× 80 GB GPUs) alongside `40 LIBERO + 40 MetaWorld + 32 RoboTwin + 8 SAM3` (`~58–65 GiB / 81.5 GiB` peak). |
+| **RoboLab `WhiteMugInCenterOfTableTask` crashes on open with `AttributeError: ... has no attribute 'bowl'`** | Upstream RoboLab declares `bowl` / `banana` in `contact_object_list` even though `objects_around_table.usda` lacks those scene prims. | `_install_contact_object_guard()` in `robots/robolab/episode_server.py` wraps `create_contact_sensors` before task registration and filters out phantom `contact_object_list` names absent from `env_cfg.scene`. |
 | **`httpx.ReadTimeout` in `robots/rl/rollout.py` under heavy 27B thinking concurrency** | Large thinking models (`max_tokens=16384`) serving 10+ concurrent multimodal turns can exceed the default `600s` client timeout. | Increase `--request-timeout-s` (e.g., `1200`–`3600`) and inspect `<ep_dir>/outcome.json` or logs to separate LLM latency from simulator pool errors. |
 
 ### 2. Multi-Node & Cross-Cluster Transport Pitfalls

@@ -467,6 +467,8 @@ class EpisodeConversation:
     initial_images: Sequence[bytes] = ()
     initial_image_cameras: Sequence[str] = ()
     messages: list[LogicalMessage] = field(default_factory=list)
+    full_messages: list[LogicalMessage] = field(default_factory=list)
+    compaction_events: list[dict[str, Any]] = field(default_factory=list)
     output_retries: int = 0
 
     def __post_init__(self) -> None:
@@ -486,17 +488,30 @@ class EpisodeConversation:
                     initial_image_cameras=self.initial_image_cameras,
                 )
             ]
+        if not self.full_messages:
+            self.full_messages = list(self.messages)
 
     def images(self) -> list[bytes]:
         """Return all raw binary PNG images across active messages in order."""
         return [img for msg in self.messages for img in msg.images]
 
-    def wire_messages(self, *, inline_base64: bool = False) -> list[dict[str, Any]]:
-        """Flatten logical messages into template dicts (or Base64-inlined OpenAI dicts)."""
+    def all_images_by_id(self) -> dict[str, bytes]:
+        """Return deduplicated ``{file_id: png_bytes}`` across lossless ``full_messages``."""
+        out: dict[str, bytes] = {}
+        for msg in self.full_messages:
+            for img in msg.images:
+                fid = file_id_for(img)
+                if fid not in out:
+                    out[fid] = img
+        return out
+
+    def _wire_from(
+        self, logical_messages: Sequence[LogicalMessage], *, inline_base64: bool
+    ) -> list[dict[str, Any]]:
         if not inline_base64:
-            return [item for msg in self.messages for item in msg.wire]
+            return [item for msg in logical_messages for item in msg.wire]
         out: list[dict[str, Any]] = []
-        for msg in self.messages:
+        for msg in logical_messages:
             if not msg.images:
                 out.extend(msg.wire)
                 continue
@@ -507,6 +522,14 @@ class EpisodeConversation:
                 self._openai_wire_cache[key] = cached
             out.extend(cached)
         return out
+
+    def wire_messages(self, *, inline_base64: bool = False) -> list[dict[str, Any]]:
+        """Flatten active logical messages into template dicts (or Base64-inlined OpenAI dicts)."""
+        return self._wire_from(self.messages, inline_base64=inline_base64)
+
+    def full_wire_messages(self, *, inline_base64: bool = False) -> list[dict[str, Any]]:
+        """Flatten lossless uncompacted logical messages into template dicts."""
+        return self._wire_from(self.full_messages, inline_base64=inline_base64)
 
     def _compact_base(self, cfg: CompactionConfig) -> bool:
         cutoff = find_safe_cutoff(self.messages, cfg.keep_messages)
@@ -612,14 +635,29 @@ class EpisodeConversation:
         if not (over_messages or over_tokens):
             return False
 
+        before_len = len(self.messages)
+        before_images = sum(len(m.images) for m in self.messages)
         if cfg.strategy == "dynamic":
-            return self._compact_dynamic(
+            compacted = self._compact_dynamic(
                 cfg,
                 current_tokens=current_tokens,
                 count_text=count_text,
                 over_messages=over_messages,
             )
-        return self._compact_base(cfg)
+        else:
+            compacted = self._compact_base(cfg)
+        if compacted:
+            self.compaction_events.append(
+                {
+                    "strategy": cfg.strategy,
+                    "logical_messages_before": before_len,
+                    "logical_messages_after": len(self.messages),
+                    "images_before": before_images,
+                    "images_after": sum(len(m.images) for m in self.messages),
+                    "full_messages_count": len(self.full_messages),
+                }
+            )
+        return compacted
 
     def append_assistant(
         self,
@@ -628,13 +666,13 @@ class EpisodeConversation:
         reasoning_content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.messages.append(
-            assistant_message(
-                content=content,
-                reasoning_content=reasoning_content,
-                tool_calls=tool_calls,
-            )
+        msg = assistant_message(
+            content=content,
+            reasoning_content=reasoning_content,
+            tool_calls=tool_calls,
         )
+        self.messages.append(msg)
+        self.full_messages.append(msg)
 
     def append_tool_result(
         self,
@@ -645,14 +683,14 @@ class EpisodeConversation:
         images: Sequence[bytes] = (),
     ) -> None:
         self.output_retries = 0
-        self.messages.append(
-            tool_return_message(
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                text=text,
-                images=images,
-            )
+        msg = tool_return_message(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            text=text,
+            images=images,
         )
+        self.messages.append(msg)
+        self.full_messages.append(msg)
 
     def validate_or_retry(
         self, calls: Sequence[dict[str, Any]]
@@ -669,6 +707,8 @@ class EpisodeConversation:
             return None, None, args, False
         self.output_retries += 1
         if self.output_retries <= self.max_output_retries:
-            self.messages.append(retry_message(err_msg or ""))
+            msg = retry_message(err_msg or "")
+            self.messages.append(msg)
+            self.full_messages.append(msg)
             return err_kind, err_msg, None, True
         return err_kind, err_msg, None, False

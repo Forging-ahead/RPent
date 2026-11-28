@@ -766,3 +766,292 @@ def test_harness_v2_dynamic_compaction_and_fallback():
     assert len(conv.messages) <= 6
     assert conv.messages[0].kind == "opening"
     assert conv.messages[0].images == (png0,)
+    # Lossless full_messages retains every turn and image across compaction events
+    assert len(conv.full_messages) == 13
+    assert len(conv.compaction_events) == 2
+    assert len(conv.all_images_by_id()) == 7
+
+
+def test_rollout_schedule_sharding_interleaving_and_passes():
+    from robots.rl.rollout import build_episode_schedule, parse_shard_spec
+
+    rows = [
+        {
+            "query_id": f"robotwin-task_{t}-seed{s}",
+            "answer": f'{{"environment": "robotwin", "task_name": "task_{t}", "seed": {s}}}',
+        }
+        for t in range(4)
+        for s in range(6)
+    ]
+    assert parse_shard_spec("0/2") == (0, 2)
+    s0 = build_episode_schedule(
+        rows, interleave_tasks=True, shard_index=0, num_shards=2, target_count=12
+    )
+    s1 = build_episode_schedule(
+        rows, interleave_tasks=True, shard_index=1, num_shards=2, target_count=12
+    )
+    # Both shards cover 100% of all 4 tasks with zero seed overlap
+    assert {item["task_group"] for item in s0} == {f"task_{t}" for t in range(4)}
+    assert {item["task_group"] for item in s1} == {f"task_{t}" for t in range(4)}
+    assert {item["query_id"] for item in s0}.isdisjoint(
+        {item["query_id"] for item in s1}
+    )
+    # First 4 scheduled episodes cover all 4 distinct tasks (round-robin interleaved)
+    assert [item["task_group"] for item in s0[:4]] == [
+        "task_0",
+        "task_1",
+        "task_2",
+        "task_3",
+    ]
+    # Cycling beyond shard length increments pass_idx cleanly
+    s0_cycled = build_episode_schedule(
+        rows, interleave_tasks=True, shard_index=0, num_shards=2, target_count=15
+    )
+    assert len(s0_cycled) == 15
+    assert s0_cycled[0]["episode_key"].endswith("__r0")
+    assert s0_cycled[12]["episode_key"].endswith("__r1")
+    assert len({item["episode_key"] for item in s0_cycled}) == 15
+
+
+def test_rollout_atomic_save_retry_and_sft_export(tmp_path):
+    import asyncio
+    import json
+
+    import httpx
+
+    from robots.rl.rollout import (
+        EndpointPool,
+        _load_completed_episodes,
+        detect_provider,
+        run_episode,
+        split_inline_thinking,
+    )
+    from robots.rl.server import BINARY_EXECUTE_MEDIA_TYPE, pack_execute_response
+    from robots.rl.sft_export import convert_trajectory
+
+    assert split_inline_thinking("<think>\nplan\n</think>\ndone", None) == (
+        "done",
+        "plan",
+    )
+    assert (
+        detect_provider(
+            "auto",
+            model_name="deepseek-v4.1-flash",
+            model_urls=["http://172.27.116.194:18080/maas/v1"],
+            api_key="dummy",
+        )
+        == "openai"
+    )
+    assert (
+        detect_provider(
+            "auto",
+            model_name="Qwen3.8-27B",
+            model_urls=["http://127.0.0.1:30000/v1"],
+            api_key=None,
+        )
+        == "sglang"
+    )
+
+    pool = EndpointPool(["http://h1:30000/v1", "http://h1:30001/v1"])
+    u1 = pool.acquire()
+    u2 = pool.acquire()
+    assert u1 != u2
+    pool.release(u1)
+    assert pool.acquire() == u1
+
+    png0 = encode_png(np.full((32, 32, 3), 15, dtype=np.uint8))
+    png1 = encode_png(np.full((32, 32, 3), 180, dtype=np.uint8))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_actions",
+                "description": "Execute actions",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "actions": {"type": "array"},
+                        "observe": {"type": "string"},
+                    },
+                    "required": ["actions"],
+                },
+            },
+        }
+    ]
+
+    llm_calls = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/sessions/open":
+            meta = {
+                "session_id": "s1",
+                "environment": "libero",
+                "system_prompt": "SYS",
+                "user_message": "TASK",
+                "initial_observation": '{"step": 0, "images": [{"camera": "agentview"}]}',
+                "tools": tools,
+                "image_cameras": ["agentview"],
+                "init_state_id": 0,
+                "done": False,
+                "success": False,
+                "truncated": False,
+            }
+            return httpx.Response(
+                200,
+                headers={"content-type": BINARY_EXECUTE_MEDIA_TYPE},
+                content=pack_execute_response(meta, [png0]),
+            )
+        if path == "/v1/chat/completions":
+            llm_calls["n"] += 1
+            if llm_calls["n"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "0.01"}, json={})
+            if llm_calls["n"] == 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "finish_reason": "tool_calls",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "reasoning_content": "Move toward target first.",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "execute_actions",
+                                                "arguments": '{"actions": [{"action": "move_to"}], "observe": "agentview"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning_content": "Close gripper to finish.",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_2",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "execute_actions",
+                                            "arguments": '{"actions": [{"action": "set_gripper"}]}',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 150, "completion_tokens": 35},
+                },
+            )
+        if path == "/sessions/s1/execute":
+            body = json.loads(request.content)
+            if body["arguments"].get("observe"):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": BINARY_EXECUTE_MEDIA_TYPE},
+                    content=pack_execute_response(
+                        {
+                            "text": '{"step": 5}',
+                            "done": False,
+                            "success": False,
+                            "truncated": False,
+                        },
+                        [png1],
+                    ),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": BINARY_EXECUTE_MEDIA_TYPE},
+                content=pack_execute_response(
+                    {
+                        "text": '{"step": 10, "success": true}',
+                        "done": True,
+                        "success": True,
+                        "truncated": False,
+                    },
+                    [],
+                ),
+            )
+        if path == "/sessions/s1/close":
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"Unexpected path {path}")
+
+    async def _run():
+        ep_dir = tmp_path / "episodes" / "libero-t0-s0__r0"
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler)
+        ) as client:
+            return await run_episode(
+                model_url="http://mock/v1",
+                model_name="deepseek-v4.1-flash",
+                sim_url="http://sim",
+                task={"environment": "libero", "task_id": 0, "seed": 0},
+                output_dir=ep_dir,
+                episode_key="libero-t0-s0__r0",
+                query_id="libero-t0-s0",
+                api_key="test-key",
+                provider="openai",
+                max_llm_retries=3,
+                client=client,
+            )
+
+    outcome = asyncio.run(_run())
+    assert outcome["success"] is True
+    assert outcome["turns"] == 2
+    assert llm_calls["n"] == 3  # 1x 429 retry + 2 turns
+
+    ep_dir = tmp_path / "episodes" / "libero-t0-s0__r0"
+    traj_path = ep_dir / "trajectory.json"
+    assert traj_path.is_file()
+    assert "test-key" not in traj_path.read_text(encoding="utf-8")
+
+    completed = _load_completed_episodes(tmp_path)
+    assert "libero-t0-s0__r0" in completed
+    assert completed["libero-t0-s0__r0"]["success"] is True
+
+    traj = json.loads(traj_path.read_text(encoding="utf-8"))
+    # Export to ms_swift format
+    ms_sample, drop = convert_trajectory(
+        traj, traj_dir=ep_dir, export_format="ms_swift"
+    )
+    assert drop is None and ms_sample is not None
+    assert isinstance(ms_sample["tools"], str)
+    assert len(ms_sample["images"]) == 2
+    assert (
+        sum(m["content"].count("<image>") for m in ms_sample["messages"]) == 2
+    )
+    # Trailing tool_response after final execute_actions trimmed cleanly
+    assert ms_sample["messages"][-1]["role"] == "tool_call"
+    assert ms_sample["messages"][2] == {
+        "role": "assistant",
+        "content": "<think>\nMove toward target first.\n</think>\n",
+    }
+    assert ms_sample["messages"][4]["role"] == "tool_response"
+    assert ms_sample["messages"][5]["role"] == "user"
+    assert "<tool_response>" in ms_sample["messages"][5]["content"]
+
+    # Export to qwen_hf format
+    hf_sample, hf_drop = convert_trajectory(
+        traj, traj_dir=ep_dir, export_format="qwen_hf"
+    )
+    assert hf_drop is None and hf_sample is not None
+    assert isinstance(
+        hf_sample["messages"][2]["tool_calls"][0]["function"]["arguments"], dict
+    )
+    assert hf_sample["messages"][2]["reasoning_content"] == "Move toward target first."

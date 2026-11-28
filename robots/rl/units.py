@@ -21,11 +21,12 @@ import re
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict, create_model
 
-from rpent.tools import Tool
+if TYPE_CHECKING:
+    from rpent.tools import Tool
 
 EPISODE_CONTRACT_VERSION = 3
 CAMERAS: dict[str, tuple[str, ...]] = {
