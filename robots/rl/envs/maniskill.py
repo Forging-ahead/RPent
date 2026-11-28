@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import inspect
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -25,17 +25,26 @@ import numpy as np
 from pydantic import Field
 from scipy.spatial.transform import Rotation
 
-from robots.rl.envs.libero import (
+from robots.rl.control import (
+    CartesianServo,
     ControlConfig,
-    LiberoRLPrimitives,
     Measurement,
+    MobileControl,
     _clip_norm,
 )
-from robots.rl.envs.robocasa import RoboCasaRLPrimitives
-from robots.rl.geometry import Coordinates, grasp_axes, world_from_depth
+from robots.rl.geometry import (
+    Coordinates,
+    grasp_axes,
+    mounting_calibration,
+    world_from_depth,
+)
 from robots.rl.perception import RecordedPerception
 from robots.rl.toolkit import ActionBatch, DualArmBatch, MobileBatch, MoveAction
+from robots.rl.units import CAMERAS
 from rpent.tools import ToolResult, tool
+
+CATALOG = json.loads(Path(__file__).with_name("maniskill_tasks.json").read_text())
+TASK_DESCRIPTIONS = {**CATALOG["tasks"], **CATALOG["optional_tasks"]}
 
 
 class ToolTipBatch(ActionBatch):
@@ -43,22 +52,8 @@ class ToolTipBatch(ActionBatch):
     def execute_actions(
         self, actions: Annotated[list[MoveAction], Field(min_length=1)]
     ) -> ToolResult:
-        """Execute 1..K move_to items for the tool tip. Each item is measured before continuing."""
+        """Execute 1..K ordered move_to commands for the pen tip. Supply xyz, orientation_rpy, or both. Each move uses the measured start pose for omitted fields. Execution stops on success, truncation, error or partial movement. Read executed_count, stop_reason and final_state before continuing."""
         return self._execute_actions(actions)
-
-
-def _task_hint(env_id, image_size=512):
-    instructions = (
-        Path(__file__).resolve().parents[1] / "prompts" / "maniskill_general.md"
-    ).read_text(encoding="utf-8")
-    section = instructions.partition(f"\n## {env_id}\n")[2].partition("\n## ")[0]
-    hint = " ".join(section.split())
-    if image_size != 512 and "512px" in hint:
-        hint = (
-            "For the pixel formulas below, multiply displayed rows, columns and box "
-            f"edges by 512/{image_size} first. Use displayed pixels for tool calls. "
-        ) + hint
-    return hint
 
 
 def _make_env(
@@ -72,14 +67,10 @@ def _make_env(
     from mani_skill.utils import common
     from mani_skill.utils.registration import REGISTERED_ENVS
     from omegaconf import OmegaConf
-    from rlinf.agents.rpent.maniskill_tasks import CARTESIAN_TASKS
     from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
-    from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
-        resolve_maniskill_task_descriptions,
-    )
 
     env_id = "PickCube-v1" if task_name == "pick_cube" else task_name
-    if env_id not in CARTESIAN_TASKS:
+    if env_id not in TASK_DESCRIPTIONS:
         raise ValueError(f"Unsupported ManiSkill pose task: {env_id}")
     if env_id not in REGISTERED_ENVS:
         raise ValueError(f"Unknown ManiSkill task {env_id!r}")
@@ -96,12 +87,6 @@ def _make_env(
         horizon = min(horizon, max_episode_steps) if horizon else max_episode_steps
 
     class RPentManiskillEnv(ManiskillEnv):
-        @property
-        def instruction(self):
-            return resolve_maniskill_task_descriptions(
-                self.unwrapped, num_envs=1, is_peg_insertion_side=False
-            )[0]
-
         def _wrap_obs(self, raw_obs, infos=None):
             # RPent records individual camera frames and their calibration.
             return common.unbatch(common.to_numpy(raw_obs))
@@ -157,28 +142,11 @@ def _make_env(
                     native._custom_sensor_configs[name] = {
                         "intrinsic": scale @ camera.intrinsic
                     }
-            env.reset(seed=seed, options={"reconfigure": True})
+
         except BaseException:
             env.close()
             raise
     return env, env_id
-
-
-def horizontal_rotation(forward: np.ndarray) -> np.ndarray:
-    """Return forward, left and up axes from a measured heading in world space."""
-    x, y = forward[:2]
-    length = np.linalg.norm([x, y, 0.0])
-    if length < 1e-6:
-        raise ValueError("robot base forward axis must have a horizontal projection")
-    x, y = x / length, y / length
-    return np.array([[x, -y, 0], [y, x, 0], [0, 0, 1]])
-
-
-def dual_arm_mount(
-    left: np.ndarray, right: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Measure the common arm origin and heading from both mounting centres."""
-    return (left + right) / 2, horizontal_rotation(np.cross(left - right, [0, 0, 1]))
 
 
 class LocalManiSkillEnv:
@@ -196,23 +164,17 @@ class LocalManiSkillEnv:
             task_name, render_device, max_episode_steps, seed
         )
         try:
-            self.obs, self.info = self.scene.reset(seed=seed)
+            self.obs, self.info = self.scene.reset(
+                seed=seed,
+                options={"reconfigure": True}
+                if any(
+                    c.intrinsic is not None
+                    for c in self.scene.unwrapped._sensor_configs.values()
+                )
+                else None,
+            )
             self.last_info = {"init_state_id": seed}
-            self.task_language = self.scene.instruction
-            if not self.task_language:
-                doc = inspect.cleandoc(type(self.scene.unwrapped).__doc__ or "")
-                description = (
-                    doc.removeprefix("**Task Description:**").strip().split("\n\n")[0]
-                )
-                self.task_language = (
-                    f"{self.env_id}: {description}" if description else self.env_id
-                )
-            hint = _task_hint(self.env_id, image_size)
-            if hint:
-                self.task_language += " " + hint.replace(
-                    "{max_episode_steps}",
-                    str(self.scene.cfg.init_params.max_episode_steps),
-                )
+            self.task_language = TASK_DESCRIPTIONS[self.env_id]
         except BaseException:
             self.close()
             raise
@@ -242,7 +204,7 @@ class UnsupportedRobotPolicy(ValueError):
     """The registered robot lacks a public RPent action for this embodiment."""
 
 
-class ManiSkillArm(LiberoRLPrimitives):
+class ManiSkillArm(CartesianServo):
     def __init__(self, episode, agent):
         self.episode = episode
         self.agent = agent
@@ -309,6 +271,7 @@ class ManiSkillArm(LiberoRLPrimitives):
             or getattr(self.agent, f"finger{i}_link")
             for i in (1, 2)
         ]
+        self.fingertips = fingers
         drive = names[0]
         if gripper is not None:
             controlled = np.asarray(
@@ -356,12 +319,7 @@ class ManiSkillArm(LiberoRLPrimitives):
         jaw, approach = axes[opened]
         jaw = jaw / np.linalg.norm(jaw)
         approach = approach - jaw * (jaw @ approach)
-        if self.agent.uid in {"panda", "panda_wristcam"}:
-            # Use the robot's grasp convention at its designated hand TCP.
-            grasp = self.agent.build_grasp_pose(np.eye(3)[2], np.eye(3)[0], np.zeros(3))
-            self.tool_rotation = transform(grasp)[:3, :3].T
-        else:
-            self.tool_rotation = grasp_axes(jaw, approach)
+        self.tool_rotation = grasp_axes(jaw, approach)
 
     def _opening(self):
         if not self.has_gripper:
@@ -494,7 +452,17 @@ class ManiSkillJointArm(ManiSkillArm):
     """Use selected channels of an absolute joint-position controller."""
 
     def __init__(
-        self, episode, agent, tcp, mount, targets, channels, arm, fingers, axes
+        self,
+        episode,
+        agent,
+        tcp,
+        mount,
+        targets,
+        channels,
+        arm,
+        fingers,
+        fingertips,
+        palm,
     ):
         self.episode = episode
         self._config = episode._config
@@ -518,7 +486,14 @@ class ManiSkillJointArm(ManiSkillArm):
         self.closed = (
             0.7 * limits[np.arange(len(fingers)), np.abs(limits).argmax(axis=1)]
         )
-        self.tool_rotation = grasp_axes(*axes)
+        self.fingertips = [self.robot.links_map[name] for name in fingertips]
+        first, second = [transform(link.pose)[:3, 3] for link in self.fingertips]
+        wrist = transform(self.robot.links_map[palm].pose)[:3, 3]
+        tcp_rotation = self._tcp()[:3, :3].T
+        self.tool_rotation = grasp_axes(
+            tcp_rotation @ (first - second),
+            tcp_rotation @ ((first + second) / 2 - wrist),
+        )
         self.opening_target = self._opening()
 
     def _tcp(self):
@@ -572,7 +547,8 @@ def g1_arms(episode, agent):
             channels,
             arm,
             getattr(agent, f"{side}_finger_joints"),
-            ([0, 1, 0], [1, 0, 0]),
+            (f"{side}_two_link", f"{side}_four_link"),
+            f"{side}_palm_link",
         )
     return arms
 
@@ -588,11 +564,12 @@ def floating_hand(episode, agent):
         channels,
         agent.root_joint_names,
         [n for n in channels if n not in agent.root_joint_names],
-        ([1, 0, 0], [0, 0, 1]),
+        ("thumb_tip", "index_tip"),
+        "base",
     )
 
 
-class ManiSkillRLPrimitives(RecordedPerception):
+class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
     """Apply shared Cartesian and mobile control to the native robot's controllers."""
 
     use_requested_display_size = True
@@ -601,9 +578,8 @@ class ManiSkillRLPrimitives(RecordedPerception):
     def tool_profile(toolkit, perception):
         """Select the shared action batch and cameras supported by this robot."""
         if perception is None:
-            raise ValueError(
-                "ManiSkill tool declarations require the active robot and cameras"
-            )
+            cameras = CAMERAS["maniskill"]
+            return ActionBatch(toolkit).execute_actions, (cameras,) * 3
         capabilities = perception.tool_capabilities
         if capabilities.get("mobile"):
             batch = MobileBatch(toolkit).execute_actions
@@ -625,12 +601,6 @@ class ManiSkillRLPrimitives(RecordedPerception):
             rgb if capabilities["segment"] else (),
             capabilities["depth_cameras"],
         )
-
-    BASE_LIMITS = RoboCasaRLPrimitives.BASE_LIMITS
-    move_base = RoboCasaRLPrimitives.move_base
-    move_lift = RoboCasaRLPrimitives.move_lift
-    _mobility_delta = RoboCasaRLPrimitives._mobility_delta
-    _mobility_feedback = RoboCasaRLPrimitives._mobility_feedback
 
     def __init__(self, *, env: LocalManiSkillEnv, max_episode_steps: int, **kwargs):
         self._init_perception(
@@ -720,7 +690,25 @@ class ManiSkillRLPrimitives(RecordedPerception):
         }
         table = getattr(getattr(native, "table_scene", None), "table", None)
         mesh = table.get_first_collision_mesh() if table is not None else None
-        self.table_z = None if mesh is None else float(mesh.bounds[1, 2])
+        self.surface_kind = "table" if mesh is not None else "floor"
+        if mesh is None:
+            ground = getattr(native, "ground", None)
+            if ground is None:
+                ground = native.scene.actors.get("ground")
+            if ground is None:
+                raise ValueError(f"Missing support surface in {self.env_id}")
+            # SAPIEN represents infinite floors with a plane collision.
+            body = ground._objs[0].find_component_by_type(
+                __import__("sapien").physx.PhysxRigidStaticComponent
+            )
+            plane = next(
+                shape
+                for shape in body.collision_shapes
+                if type(shape).__name__ == "PhysxCollisionShapePlane"
+            )
+            self.surface = (ground._objs[0].pose * plane.local_pose).p
+        else:
+            self.surface = mesh.bounds[1]
         self._refresh_coordinates()
         self._save_artifact("coordinates.json", self.coordinates.metadata(), None)
 
@@ -751,6 +739,9 @@ class ManiSkillRLPrimitives(RecordedPerception):
             measured = arm.measure().state()
             if not arm.has_gripper:
                 measured.pop("opening")
+            else:
+                a, b = [transform(link.pose)[:3, 3] for link in arm.fingertips]
+                measured["finger_gap_m"] = round(float(np.linalg.norm(a - b)), 5)
             states[name] = measured
         if self.mobile:
             arm = self.arms["arm"]
@@ -758,30 +749,37 @@ class ManiSkillRLPrimitives(RecordedPerception):
                 np.asarray(arm.parts["body"].qpos)[0, self._lift_index]
             )
         if self.dual_arm:
-            return states
-        state = states["arm"]
-        if self.env_id == "PickCube-v1":
-            # The goal marker is intentionally hidden from ManiSkill policy cameras.
-            extra = self._obs["extra"]
-            goal = self.coordinates.points(np.asarray(extra["goal_pos"]))
-            state["goal"] = {"xyz": goal.round(4).tolist()}
-            state["is_grasped"] = bool(extra["is_grasped"])
-            state["cube_size_m"] = 2 * self.env.scene.unwrapped.cube_half_size
+            return {**states, "env_steps": self.env_steps}
+        state = {**states["arm"], "env_steps": self.env_steps}
+        goal = self._obs.get("extra", {}).get("goal_pos")
+        if goal is not None:
+            state["goal"] = {
+                "xyz": self.coordinates.points(np.asarray(goal)).round(4).tolist()
+            }
         return state
 
     def _refresh_coordinates(self):
         mounts = [transform(arm.mount.pose) for arm in self.arms.values()]
         if self.dual_arm:
-            origin, rotation = dual_arm_mount(mounts[0][:3, 3], mounts[1][:3, 3])
+            calibration = mounting_calibration(
+                mounts[0][:3, 3],
+                mounts[1][:3, 3],
+                self.surface,
+                support_surface=self.surface_kind,
+            )
         else:
-            origin = mounts[0][:3, 3].copy()
-            rotation = horizontal_rotation(mounts[0][:3, self._mount_forward_axis])
-        coords = Coordinates(
-            origin,
-            rotation,
-            table_height_m=None if self.table_z is None else self.table_z - origin[2],
-            tcp="native_grasp_tcp" if self.has_gripper else "native_tool_tip",
+            mount = mounts[0]
+            calibration = {
+                "base_xyz": mount[:3, 3],
+                "base_rotation": np.roll(
+                    mount[:3, :3], -self._mount_forward_axis, axis=1
+                ),
+                f"{self.surface_kind}_top_xyz": self.surface,
+            }
+        calibration["tcp"] = (
+            "native_grasp_tcp" if self.has_gripper else "native_tool_tip"
         )
+        coords = Coordinates.from_control({"coordinate_calibration": calibration})
         self.coordinates = (
             coords.after(self.coordinates) if hasattr(self, "coordinates") else coords
         )
@@ -826,10 +824,20 @@ class ManiSkillRLPrimitives(RecordedPerception):
             }
         else:
             action = next(iter(self.arms.values())).last[None, :]
-        self._obs, reward, terminated, truncated, self._info = self.env.scene.step(
-            action
+        native = self.env.scene.unwrapped
+        mode = native.obs_mode
+        try:
+            if not self.record_artifacts:
+                native._obs_mode = "state_dict"
+            self._obs, reward, terminated, truncated, self._info = self.env.scene.step(
+                action
+            )
+        finally:
+            native._obs_mode = mode
+        self.terminated, self.truncated = (
+            bool(terminated),
+            bool(truncated) and not bool(terminated),
         )
-        self.terminated, self.truncated = bool(terminated), bool(truncated)
         self.reward = float(reward)
         episode = self._info["episode"]
         self.episode_return = float(episode["return"])
@@ -853,6 +861,9 @@ class ManiSkillRLPrimitives(RecordedPerception):
         return {"terminated": self.terminated, "truncated": self.truncated}
 
     def capture(self, camera: str) -> tuple[np.ndarray, np.ndarray, dict]:
+        if "sensor_data" not in self._obs:
+            scene = self.env.scene
+            self._obs = scene._wrap_obs(scene.unwrapped.get_obs())
         data = self._obs["sensor_data"][camera]
         rgb = data["rgb"]
         if camera not in self.depth_cameras:

@@ -126,7 +126,6 @@ def tool_return_message(
     tool_call_id: str,
     text: str,
     images: Sequence[bytes] = (),
-    qwen_image_frame: bool = True,
 ) -> LogicalMessage:
     """Build a tool return logical message (with optional framed Qwen image turn)."""
     if not images:
@@ -144,9 +143,7 @@ def tool_return_message(
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    user_parts: list[dict[str, Any]] = []
-    if qwen_image_frame:
-        user_parts.append({"type": "text", "text": TOOL_RESPONSE_OPEN})
+    user_parts: list[dict[str, Any]] = [{"type": "text", "text": TOOL_RESPONSE_OPEN}]
     total_img_tokens = 0
     for img, fid in zip(raw_images, fids, strict=True):
         total_img_tokens += count_image_tokens(img)
@@ -166,8 +163,7 @@ def tool_return_message(
                 {"type": "text", "text": "</tool_result>"},
             ]
         )
-    if qwen_image_frame:
-        user_parts.append({"type": "text", "text": TOOL_RESPONSE_CLOSE})
+    user_parts.append({"type": "text", "text": TOOL_RESPONSE_CLOSE})
     return LogicalMessage(
         kind="tool",
         wire=(
@@ -466,7 +462,6 @@ class EpisodeConversation:
         tool_call_id: str,
         text: str,
         images: Sequence[bytes] = (),
-        qwen_image_frame: bool = True,
     ) -> None:
         self.output_retries = 0
         self.messages.append(
@@ -475,12 +470,11 @@ class EpisodeConversation:
                 tool_call_id=tool_call_id,
                 text=text,
                 images=images,
-                qwen_image_frame=qwen_image_frame,
             )
         )
 
     def validate_or_retry(
-        self, calls: Sequence[dict[str, Any]], *, reply_to_tools: bool = False
+        self, calls: Sequence[dict[str, Any]]
     ) -> tuple[str | None, str | None, dict[str, Any] | None, bool]:
         """Validate calls; append retry feedback if within retry budget.
 
@@ -494,18 +488,6 @@ class EpisodeConversation:
             return None, None, args, False
         self.output_retries += 1
         if self.output_retries <= self.max_output_retries:
-            feedback = retry_message(err_msg or "")
-            if reply_to_tools:
-                # Chat Completions requires a matching result for every requested call.
-                for call in calls:
-                    self.messages.append(
-                        tool_return_message(
-                            tool_name=call["name"],
-                            tool_call_id=call["id"],
-                            text=feedback.wire[0]["content"],
-                        )
-                    )
-            else:
-                self.messages.append(feedback)
+            self.messages.append(retry_message(err_msg or ""))
             return err_kind, err_msg, None, True
         return err_kind, err_msg, None, False

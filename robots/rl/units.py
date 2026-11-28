@@ -30,6 +30,7 @@ from rpent.tools import Tool
 EPISODE_CONTRACT_VERSION = 3
 CAMERAS: dict[str, tuple[str, ...]] = {
     "libero": ("agentview", "wrist"),
+    "maniskill": ("base_camera",),
     "metaworld": ("corner2", "gripperPOV"),
     "robocasa": ("agentview", "agentview_right", "wrist"),
     "robotwin": ("head", "left_wrist", "right_wrist"),
@@ -347,6 +348,8 @@ def validate_relations(name: str, arguments: dict[str, Any]) -> None:
 
 def argument_hint(name: str, environment: str = "libero") -> str:
     """Short actionable model feedback on invalid tool arguments."""
+    if environment == "maniskill" and name in {"execute_actions", "move_base"}:
+        return "Use only the declared actions. Pens accept move_to; Fetch base commands require vy=0."
     if environment == "metaworld" and name in {
         "execute_actions",
         "move_to",

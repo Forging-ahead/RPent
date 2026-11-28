@@ -92,8 +92,7 @@ The simulator worker uses RLinf's native ManiSkill environment. On a Linux host 
 
 ```bash
 python -m pip install -r requirements/rl-maniskill.txt
-git clone https://github.com/Forging-ahead/RLinf.git ../RLinf-maniskill
-git -C ../RLinf-maniskill checkout 54aa72645536767988ae8254bd8449773698c9e9
+git clone -b rpent-grpo-clean https://github.com/zhexuanxu/RLinf.git ../RLinf-maniskill
 export PYTHONPATH="$(cd ../RLinf-maniskill && pwd)${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
@@ -104,29 +103,7 @@ python -m robots.rl.server serve --env maniskill --workers 1 --gpus 0 \
   --port 28567 --sam3-endpoint http://127.0.0.1:28510
 ```
 
-To reproduce the 29-task evaluation, generate one row per evaluated task from the pinned catalog. Five additional catalog entries require separate asset packs and are outside this evaluation.
-
-```bash
-python - <<'MANIFEST' > maniskill-seed0.jsonl
-import json
-from rlinf.agents.rpent.maniskill_tasks import EVALUATED_POSE_TASKS
-
-for task in sorted(EVALUATED_POSE_TASKS):
-    print(json.dumps({"environment": "maniskill", "task_name": task, "seed": 0}))
-MANIFEST
-```
-
-In the rollout process, load the DeepSeek API key into `DEEPSEEK_API_KEY` and run:
-
-```bash
-python -m robots.rl.rollout --model-url https://api.deepseek.com \
-  --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
-  --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
-  --tasks-jsonl maniskill-seed0.jsonl --output-dir outputs/maniskill \
-  --concurrency 1 --max-turns 64 --max-tokens 65536 --record-artifacts
-```
-
-Each row starts one episode with the task's native step limit. Set `--concurrency` to the number of available workers to run independent tasks in parallel. The rollout writes per-task results to `ep_*/outcome.json` and the overall success rate to `summary.json`.
+Use the companion RLinf task preparation command with `--maniskill-catalog robots/rl/envs/maniskill_tasks.json` and explicit seeds. The default catalog contains 25 RGB-D tasks. Four RGB-only tasks and five tasks needing additional assets are opt-in.
 
 ### RoboLab DROID
 

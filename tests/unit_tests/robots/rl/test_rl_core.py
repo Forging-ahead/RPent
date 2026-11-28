@@ -96,7 +96,8 @@ def test_geometry_backproject_and_png():
 
 
 @pytest.mark.parametrize(
-    "env", ["libero", "robotwin", "robocasa", "robodojo", "metaworld", "robolab"]
+    "env",
+    ["libero", "robotwin", "robocasa", "robodojo", "metaworld", "robolab", "maniskill"],
 )
 def test_prompts_all_envs(env: str):
     sys_p, usr_m = render_prompts(env, reasoning=True, max_actions_per_call=3)

@@ -161,21 +161,3 @@ SAM3 服务只加载一次模型，可以由多个 RPent 运行复用。
    ssh -N -L 8000:127.0.0.1:8000 USER@HOST
 
 在本机浏览器打开 ``http://127.0.0.1:8000``。保持 SSH 连接和服务器上的 RPent 进程运行；任务操作见 :doc:`dashboard`。
-
-评测 ManiSkill 任务
--------------------
-
-使用独立 rollout 客户端连接 ManiSkill 仿真池和上文的 SAM3 服务。仿真池需要支持 CUDA 和 Vulkan 的 Linux 主机、ManiSkill 资产和指定版本的 RLinf 任务目录。
-
-:download:`仿真器 README 中的 ManiSkill 一节 <../../../../robots/rl/README.md>` 提供了安装命令和生成 29 个计分任务 seed 0 清单的方法。
-
-运行单个任务时，清单只需一行 JSON。在 rollout 进程的环境变量 ``DEEPSEEK_API_KEY`` 中加载密钥。如果仿真池监听 28567 端口，以下命令会记录一条轨迹。
-
-.. code-block:: bash
-
-   echo '{"environment":"maniskill","task_name":"PickCube-v1","seed":0}' > task.jsonl
-   python -m robots.rl.rollout --model-url https://api.deepseek.com \
-     --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
-     --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
-     --tasks-jsonl task.jsonl --output-dir outputs/maniskill \
-     --max-turns 64 --max-tokens 65536 --record-artifacts

@@ -1,2 +1,5 @@
-# Run from the RPent checkout in a dedicated Linux simulator environment.
--e .[maniskill]
+-e .
+mani_skill==3.0.0b22
+svgpathtools==1.8.0
+opencv-python
+torch

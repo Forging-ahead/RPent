@@ -282,8 +282,6 @@ def system_prompt(variables: Mapping[str, object] | None = None) -> str:
     prompts = Path(__file__).parent / "prompts"
     names = ("general.md", f"{environment}_general.md", "episode.md")
     sections = [(prompts / name).read_text().strip() for name in names]
-    # Task sections belong in the active episode's instruction.
-    sections[1] = sections[1].partition("\n# Task instructions\n")[0].rstrip()
     if not variables.get("reasoning", True):
         sections[-1] = sections[-1].replace(
             "Reason briefly about the next decision using observations, not hypothetical completed actions.",
@@ -470,9 +468,6 @@ class RLToolkit(Toolkit):
         obs = ToolResult(
             data={"task": self._task, "state": {"step": step, **self._robot_state()}}
         )
-        sensors = getattr(self._primitives, "tool_capabilities", None)
-        if sensors is not None:
-            obs.data["sensors"] = sensors
         obs = self._model_feedback(obs)
         self._count_images(obs)
         return obs
@@ -613,7 +608,11 @@ class RLToolkit(Toolkit):
             "done": self.completion_result() is not None,
             "success": success,
             "truncated": self.truncated,
-            **self.evaluation_metrics(success=success),
+            **(
+                self._primitives.native_outcome()
+                if hasattr(self._primitives, "native_outcome")
+                else {}
+            ),
         }
 
     def close(self) -> None:

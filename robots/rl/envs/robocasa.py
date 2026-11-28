@@ -23,17 +23,22 @@ import numpy as np
 from pydantic import Field
 from scipy.spatial.transform import Rotation
 
-from robots.rl.envs.libero import ControlConfig, Measurement, _clip_norm, _stalled
+from robots.rl.control import (
+    ControlConfig,
+    Measurement,
+    MobileControl,
+    _clip_norm,
+    _stalled,
+)
 from robots.rl.geometry import Coordinates, grasp_axes
 from robots.rl.perception import RecordedPerception
 from rpent.tools import ToolResult, tool
 
 
-class RoboCasaRLPrimitives(RecordedPerception):
+class RoboCasaRLPrimitives(MobileControl, RecordedPerception):
     """Dynamic mounting coordinates with native grip_site, mobile base, and lift."""
 
     cameras = ("agentview", "agentview_right", "wrist")
-    BASE_LIMITS = np.array([0.35, 0.35, 0.5], dtype=float)
 
     def __init__(
         self,
@@ -346,161 +351,3 @@ class RoboCasaRLPrimitives(RecordedPerception):
         native[6] = float(np.clip(4 * (self._opening() - self._hold_opening), -1, 1))
         self.env.step(native)
         self.env_steps += 1
-
-    def _mobility_delta(self, before):
-        after = self._mobility_state()
-        initial_frame = before[1].inv()
-        displacement = initial_frame.apply(after[0] - before[0])
-        forward = (initial_frame * after[1]).as_matrix()[:, 0]
-        yaw = float(np.arctan2(forward[1], forward[0]))
-        return displacement, yaw, float(after[2][2] - before[2][2])
-
-    def _mobility_feedback(self, motion, start_steps, request, reason):
-        displacement, yaw, height_change = motion
-        return {
-            "status": "reached" if reason == "completed" else "partial",
-            "reason": reason,
-            "requested": request,
-            "displacement_initial_base_m": np.round(displacement, 4).tolist(),
-            "yaw_change_rad": round(yaw, 4),
-            "mount_height_change_m": round(height_change, 4),
-            "executed_steps": self.env_steps - start_steps,
-            "executed_duration_s": round(
-                (self.env_steps - start_steps) / self._meta["control_freq"], 4
-            ),
-            "env_steps": self.env_steps,
-        }
-
-    @tool
-    def move_base(
-        self,
-        vx: Annotated[float, Field(ge=-0.35, le=0.35)] = 0,
-        vy: Annotated[float, Field(ge=-0.35, le=0.35)] = 0,
-        yaw_rate: Annotated[float, Field(ge=-0.5, le=0.5)] = 0,
-        duration_s: Annotated[float, Field(ge=0.1, le=2)] = 1,
-    ) -> ToolResult:
-        """Move the mobile base at bounded velocity in its current local frame, then stop."""
-        physical = np.asarray([vx, vy, yaw_rate], dtype=float)
-        cfg = self._meta["parts"]["base"]
-        if (
-            not np.isfinite(physical).all()
-            or not np.isfinite(duration_s)
-            or not 0.1 <= duration_s <= 2
-            or np.any(np.abs(physical) > self.BASE_LIMITS)
-            or np.any(physical < cfg["actuator_min"])
-            or np.any(physical > cfg["actuator_max"])
-        ):
-            return ToolResult(
-                data={"error": "Invalid mobile-base velocity or duration"}
-            )
-        if self.ended:
-            return ToolResult(data={"error": "episode_ended"})
-        before, start_steps = self._mobility_state(), self.env_steps
-        requested_steps = max(2, round(duration_s * self._meta["control_freq"]))
-        count = min(requested_steps, self._max_episode_steps - self.env_steps)
-        reason, drive_steps = "completed", 0
-        try:
-            for _ in range(max(0, count - 1)):
-                if self.ended:
-                    reason = "episode_ended"
-                    break
-                self._mobile_step(physical)
-                drive_steps += 1
-        finally:
-            if not self.ended and self.env_steps < self._max_episode_steps:
-                self._mobile_step(check_cancelled=False)
-        if self.ended:
-            reason = "episode_ended" if self.native_success() else "budget_exhausted"
-        elif count < requested_steps:
-            reason = "budget_exhausted"
-        motion = self._mobility_delta(before)
-        displacement, yaw, _ = motion
-        result = self._mobility_feedback(
-            motion,
-            start_steps,
-            {"vx": vx, "vy": vy, "yaw_rate": yaw_rate, "duration_s": duration_s},
-            reason,
-        )
-        duration = drive_steps / self._meta["control_freq"]
-        expected_yaw = yaw_rate * duration
-        half_yaw = expected_yaw / 2
-        velocity = Rotation.from_euler("z", half_yaw).apply([vx, vy, 0])[:2]
-        expected_xy = duration * np.sinc(half_yaw / np.pi) * velocity
-        residual_xy = expected_xy - displacement[:2]
-        expected_distance = float(np.linalg.norm(expected_xy))
-        translation_error = float(np.linalg.norm(residual_xy))
-        yaw_error = expected_yaw - yaw
-        result["translation_error_m"] = round(translation_error, 4)
-        result["translation_shortfall_m"] = round(
-            float(residual_xy @ expected_xy) / expected_distance
-            if expected_distance
-            else 0.0,
-            4,
-        )
-        result["yaw_shortfall_rad"] = round(float(np.sign(expected_yaw) * yaw_error), 4)
-        if reason == "completed":
-            result["status"] = "commanded"
-            if translation_error > max(0.05, expected_distance * 0.25) or abs(
-                yaw_error
-            ) > max(0.0524, abs(expected_yaw) * 0.25):
-                result.update(status="partial", reason="limited_motion")
-        return ToolResult(data=result)
-
-    @tool
-    def move_lift(
-        self,
-        delta_m: Annotated[float, Field(ge=-0.25, le=0.25)],
-        duration_s: Annotated[float, Field(ge=0.1, le=5)] = 3,
-    ) -> ToolResult:
-        """Raise or lower the arm's mounting support relative to its current measured height."""
-        if (
-            not np.isfinite([delta_m, duration_s]).all()
-            or not -0.25 <= delta_m <= 0.25
-            or not 0.1 <= duration_s <= 5
-        ):
-            return ToolResult(data={"error": "Invalid lift displacement or duration"})
-        if self.ended:
-            return ToolResult(data={"error": "episode_ended"})
-        before, start_steps = self._mobility_state(), self.env_steps
-        target = before[2][2] + delta_m
-        count = min(
-            max(2, round(duration_s * self._meta["control_freq"])),
-            self._max_episode_steps - self.env_steps,
-        )
-        reason, previous, still = "motion_budget", before[2][2], 0
-        cfg = self._meta["parts"]["torso"]
-        try:
-            for _ in range(max(0, count - 1)):
-                if self.ended:
-                    reason = "episode_ended"
-                    break
-                height = self._mobility_state()[2][2]
-                error = target - height
-                if abs(error) <= 0.004:
-                    reason = "completed"
-                    break
-                still = still + 1 if abs(height - previous) < 0.0002 else 0
-                previous = height
-                if still >= 12:
-                    reason = "blocked_or_joint_limit"
-                    break
-                low, high = float(cfg["output_min"][0]), float(cfg["output_max"][0])
-                self._mobile_step(
-                    lift=float(np.clip(error, max(low, -0.025), min(high, 0.025)))
-                )
-        finally:
-            if not self.ended and self.env_steps < self._max_episode_steps:
-                self._mobile_step(check_cancelled=False)
-        motion = self._mobility_delta(before)
-        height_error = delta_m - motion[2]
-        if self.ended:
-            reason = "episode_ended" if self.native_success() else "budget_exhausted"
-        elif abs(height_error) <= 0.004:
-            reason = "completed"
-        elif reason == "completed":
-            reason = "outside_tolerance_after_stop"
-        result = self._mobility_feedback(
-            motion, start_steps, {"delta_m": delta_m, "duration_s": duration_s}, reason
-        )
-        result["height_error_m"] = round(height_error, 4)
-        return ToolResult(data=result)
