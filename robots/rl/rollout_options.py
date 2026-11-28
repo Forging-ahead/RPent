@@ -20,7 +20,17 @@ import sys
 from datetime import datetime
 
 from rpent.planner.base import REASONING_EFFORTS
+from rpent.planner.qwen import is_qwen_model
 from rpent.utils.config import get_repo_root
+
+QWEN_SAMPLING_OPTIONS = (
+    ("--temperature", float, 1.0),
+    ("--top-p", float, 0.95),
+    ("--top-k", int, 20),
+    ("--min-p", float, 0.0),
+    ("--presence-penalty", float, 0.0),
+    ("--repetition-penalty", float, 1.0),
+)
 
 OPTIONS = (
     ("--sam3-timeout-s", float, 120),
@@ -35,12 +45,7 @@ OPTIONS = (
     ("--compaction-max-messages", int, 80),
     ("--compaction-keep-messages", int, 10),
     ("--reasoning-effort", str, None),
-    ("--temperature", float, 1.0),
-    ("--top-p", float, 0.95),
-    ("--top-k", int, 20),
-    ("--min-p", float, 0.0),
-    ("--presence-penalty", float, 0.0),
-    ("--repetition-penalty", float, 1.0),
+    *QWEN_SAMPLING_OPTIONS,
     ("--max-episode-steps", int, 10000),
     ("--planner-timeout-s", int, 7200),
 )
@@ -84,12 +89,15 @@ def add_options(parser: argparse.ArgumentParser) -> None:
 def resolve_options(args: argparse.Namespace) -> None:
     """Apply environment and model defaults underneath explicit arguments."""
     model = os.environ.get("RPENT_MODEL", "").lower()
+    use_qwen_defaults = not model or is_qwen_model(model.partition(":")[-1])
     for flag, kind, default in OPTIONS:
         name = option_name(flag)
         if getattr(args, name) is not None:
             continue
         if flag == "--reasoning-effort":
             default = "xhigh" if not model or "qwen3.8" in model else "none"
+        if not use_qwen_defaults and (flag, kind, default) in QWEN_SAMPLING_OPTIONS:
+            default = None
         value = os.environ.get(f"RPENT_{name.upper()}")
         setattr(args, name, kind(value) if value else default)
     if args.no_thinking is None:
@@ -101,6 +109,7 @@ def episode_options(args: argparse.Namespace) -> list[str]:
     values = [
         item
         for flag, _, _ in OPTIONS
+        if getattr(args, option_name(flag)) is not None
         for item in (flag, str(getattr(args, option_name(flag))))
     ]
     return [*values, "--no-thinking" if args.no_thinking else "--thinking"]
