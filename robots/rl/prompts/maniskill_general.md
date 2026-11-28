@@ -1,7 +1,3 @@
-Use the named ManiSkill policy cameras in the initial observation. The available tools identify which cameras provide depth or segmentation. Use the reported arm pose and the same coordinate frame for measured points and motion targets. A null table height means its height was not measured.
+Use the named camera. RGB-D segment and back_project report visible surfaces. In RGB-only views, segment returns table_reference.xyz for a ray through the mask intersecting the measured table. It gives the contact-plane XY for a flat object. For a point h above that plane, add h * xy_per_height to XY. Height is unmeasured; never interpret the plane as object depth.
 
-For two arms, each action selects left or right and both arms share the mounting midpoint. A drawing arm controls the native pen tip with move_to and has no gripper. On a mobile manipulator the arm actions leave the base and lift stationary.
-
-During an approach, preserve the selected arm's measured wrist orientation by omitting orientation_rpy from move_to. Change it when the next grasp or tool contact requires a different orientation.
-
-A clear initial TCP can serve as the approach hover. Use only as much clearance as the next move needs, and reserve steps for placement or the final goal. If an intermediate move stalls, check the measured TCP and the remaining steps. Continue from the measured pose when it already clears the next move.
+move_to uses the measured grasp TCP or pen tip and retains wrist orientation when orientation_rpy is omitted. Each extra waypoint costs travel and settling. Count the remaining native steps before choosing a hover. An already clear TCP can approach a visible contact directly; transport toward the destination can also verify a grasp. On blocked closure, the target opening stays active while moving. Use the next image to verify object motion before reopening. Both arms share a mounting frame; mobile arm moves hold the base and lift fixed.

@@ -610,7 +610,7 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
             max_episode_steps=env.scene.cfg.init_params.max_episode_steps,
             **kwargs,
         )
-        self._config = ControlConfig()
+        self._config = ControlConfig(position_step_m=0.07)
         self.env_id = env.env_id
         self._obs, self._info = env.obs, env.info
         sensors = self._obs.get("sensor_data", {})
@@ -764,9 +764,13 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
             states["arm"]["lift_m"] = float(
                 np.asarray(arm.parts["body"].qpos)[0, self._lift_index]
             )
+        budget = {
+            "env_steps": self.env_steps,
+            "env_steps_remaining": max(0, self._max_episode_steps - self.env_steps),
+        }
         if self.dual_arm:
-            return {**states, "env_steps": self.env_steps}
-        state = {**states["arm"], "env_steps": self.env_steps}
+            return {**states, **budget}
+        state = {**states["arm"], **budget}
         goal = self._obs.get("extra", {}).get("goal_pos")
         if goal is not None:
             state["goal"] = {
@@ -882,8 +886,6 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
             self._obs = scene._wrap_obs(scene.unwrapped.get_obs())
         data = self._obs["sensor_data"][camera]
         rgb = data["rgb"]
-        if camera not in self.depth_cameras:
-            return rgb, np.full((*rgb.shape[:2], 3), np.nan, dtype=np.float32), {}
         params = self._obs["sensor_param"][camera]
         extrinsic = np.asarray(params["extrinsic_cv"], dtype=float)
         if extrinsic.shape == (3, 4):
@@ -894,6 +896,12 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
             "intrinsic_K": np.asarray(params["intrinsic_cv"]).tolist(),
             "extrinsic_cam2world": np.linalg.inv(extrinsic).tolist(),
         }
+        if camera not in self.depth_cameras:
+            return (
+                rgb,
+                np.full((*rgb.shape[:2], 3), np.nan, dtype=np.float32),
+                calibration,
+            )
         # ManiSkill reports axial depth in millimetres, zero marks missing pixels.
         depth = np.asarray(data["depth"], dtype=np.float32) / 1000
         if depth.ndim == 3:
@@ -901,3 +909,40 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
         depth[depth <= 0] = np.nan
         points = world_from_depth(depth, calibration).astype(np.float32)
         return rgb, points, calibration
+
+    @property
+    def segment(self):
+        return super().segment.with_handler(self._segment_with_table_reference)
+
+    def _segment_with_table_reference(self, **kwargs):
+        result = super().segment(**kwargs)
+        mask_id = result.data.get("mask_id")
+        if mask_id is None:
+            return result
+        step, camera, mask = self._masks[mask_id]
+        if camera in self.depth_cameras or self.coordinates.table_height_m is None:
+            return result
+        capture = self._steps[step].cameras[camera]
+        rows, cols = np.nonzero(mask)
+        # Select a real mask pixel nearest its median, including for concave masks.
+        i = np.argmin((rows - np.median(rows)) ** 2 + (cols - np.median(cols)) ** 2)
+        plane = self._table_reference(capture.calibration, rows[i], cols[i])
+        if plane is not None:
+            result.data["table_reference"] = plane
+        return result
+
+    def _table_reference(self, calibration, row, col):
+        """Intersect a calibrated camera ray with the measured support plane."""
+        pose = np.asarray(calibration["extrinsic_cam2world"])
+        ray = pose[:3, :3] @ np.linalg.solve(calibration["intrinsic_K"], [col, row, 1])
+        direction = self.coordinates.rotation.T @ ray
+        origin = self.coordinates.points(pose[:3, 3])
+        if abs(direction[2]) < 1e-6:
+            return None
+        distance = (self.coordinates.table_height_m - origin[2]) / direction[2]
+        if distance <= 0:
+            return None
+        return {
+            "xyz": (origin + distance * direction).round(5).tolist(),
+            "xy_per_height": (direction[:2] / direction[2]).round(4).tolist(),
+        }
