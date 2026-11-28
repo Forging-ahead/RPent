@@ -92,6 +92,15 @@ RoboTwin 安装包附带的下载器将资产快照保存到 ``$PROJECT_DIR/data
    export RPENT_OUTPUT_DIR="$PROJECT_DIR/runs/libero-first"
    bash tools/rl/run.sh --simulator libero --suite libero_spatial --task 0 --seed 0
 
+在已激活的 ManiSkill 环境中设置 ``DEEPSEEK_API_KEY``，沿用上面的 SAM3 服务地址，然后用相同入口运行 PickCube。
+
+.. code-block:: bash
+
+   RPENT_MODEL=deepseek:deepseek-flash RPENT_BASE_URL=https://api.deepseek.com \
+     RPENT_OUTPUT_DIR="$PROJECT_DIR/runs/maniskill-pickcube" \
+     bash tools/rl/run.sh --simulator maniskill --task-name PickCube-v1 --seed 0 \
+       --image_size 512 --reasoning-effort high --max-turns 64 --max-tokens 4096
+
 RoboTwin、RoboCasa 和 RoboDojo 使用 ``--simulator`` 和 ``--task-name``。RoboDojo 可用 ``--layout`` 指定评测布局。输出目录保存图像、实测状态、工具回执和仿真器判定的任务结果。批量采集读取 JSON 任务清单，逐条封存并支持续跑。例如将以下内容保存到 ``$PROJECT_DIR/data/jobs.json``。
 
 .. code-block:: json

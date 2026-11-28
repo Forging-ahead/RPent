@@ -99,6 +99,15 @@ In a new terminal, return to the RPent checkout and activate the simulator envir
    export RPENT_OUTPUT_DIR="$PROJECT_DIR/runs/libero-first"
    bash tools/rl/run.sh --simulator libero --suite libero_spatial --task 0 --seed 0
 
+In the activated ManiSkill environment, set ``DEEPSEEK_API_KEY`` and use the SAM3 endpoint above to run PickCube through the same launcher.
+
+.. code-block:: bash
+
+   RPENT_MODEL=deepseek:deepseek-flash RPENT_BASE_URL=https://api.deepseek.com \
+     RPENT_OUTPUT_DIR="$PROJECT_DIR/runs/maniskill-pickcube" \
+     bash tools/rl/run.sh --simulator maniskill --task-name PickCube-v1 --seed 0 \
+       --image_size 512 --reasoning-effort high --max-turns 64 --max-tokens 4096
+
 RoboTwin, RoboCasa, and RoboDojo use ``--simulator`` and ``--task-name``. Use ``--layout`` to choose a RoboDojo evaluation layout. The output contains images, measured states, tool results, and the simulator's native outcome. For remote services, forward the loopback listeners over the private network and use the forwarded addresses.
 
 For a batch, save this manifest as ``$PROJECT_DIR/data/jobs.json``.
