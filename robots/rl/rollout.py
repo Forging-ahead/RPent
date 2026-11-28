@@ -52,7 +52,11 @@ from typing import Any, Literal
 
 import httpx
 
-from robots.rl.conversation import CompactionConfig, EpisodeConversation
+from robots.rl.conversation import (
+    CompactionConfig,
+    EpisodeConversation,
+    estimate_logical_tokens,
+)
 from robots.rl.server import BINARY_EXECUTE_MEDIA_TYPE, unpack_execute_response
 from rpent.utils.logging import get_logger
 
@@ -382,6 +386,47 @@ def _load_completed_episodes(output_dir: Path) -> dict[str, dict[str, Any]]:
     return completed
 
 
+class ContextLengthExceededError(RuntimeError):
+    """Raised when an OpenAI/SGLang endpoint rejects a prompt+max_tokens > context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        input_tokens: int | None = None,
+        max_context_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.max_context_tokens = max_context_tokens
+
+
+def _parse_context_length_error(body: str) -> ContextLengthExceededError | None:
+    lower = body.lower()
+    if not any(
+        hint in lower
+        for hint in (
+            "maximum context length",
+            "context_length",
+            "exceeds the model",
+            "too many tokens",
+            "prompt is too long",
+        )
+    ):
+        return None
+    max_ctx: int | None = None
+    in_toks: int | None = None
+    m_max = re.search(r"maximum context length of (\d+)", body)
+    if m_max:
+        max_ctx = int(m_max.group(1))
+    m_in = re.search(r"(\d+) tokens from the input", body)
+    if m_in:
+        in_toks = int(m_in.group(1))
+    return ContextLengthExceededError(
+        body[:400], input_tokens=in_toks, max_context_tokens=max_ctx
+    )
+
+
 async def _post_llm_with_retry(
     client: httpx.AsyncClient,
     *,
@@ -411,6 +456,15 @@ async def _post_llm_with_retry(
                 )
                 await asyncio.sleep(delay)
                 continue
+            if resp.status_code == 400:
+                ctx_err = _parse_context_length_error(resp.text)
+                if ctx_err is not None:
+                    raise ctx_err
+                raise httpx.HTTPStatusError(
+                    f"HTTP 400 from {active_url}: {resp.text[:300]}",
+                    request=resp.request,
+                    response=resp,
+                )
             resp.raise_for_status()
             data = resp.json()
             if not data.get("choices"):
@@ -519,7 +573,11 @@ async def run_episode(
                             "reasoning": thinking,
                             "include_jaw_mm": include_jaw_mm,
                             "record_artifacts": record_artifacts,
-                            "output_dir": str(output_dir) if output_dir else None,
+                            "output_dir": (
+                                str(output_dir)
+                                if (record_artifacts and output_dir)
+                                else None
+                            ),
                         },
                         headers={"Accept": BINARY_EXECUTE_MEDIA_TYPE},
                     )
@@ -571,44 +629,106 @@ async def run_episode(
             "completion_tokens": 0,
             "cached_tokens": 0,
         }
+        last_turn_tokens: int | None = None
+        last_msg_count = len(conv.messages)
         active_model_url = model_url.rstrip("/")
 
         try:
             while not done and turns < max_turns:
-                conv.maybe_compact()
-                payload: dict[str, Any] = {
-                    "model": model_name,
-                    "messages": conv.wire_messages(inline_base64=True),
-                    "tools": conv.tools,
-                    "parallel_tool_calls": False,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                }
-                if resolved_provider == "sglang":
-                    payload["top_k"] = top_k
-                    payload["chat_template_kwargs"] = {
-                        "enable_thinking": thinking,
-                        "preserve_thinking": True,
-                    }
+                est_current_tokens: int | None = None
+                if last_turn_tokens is not None:
+                    delta_msgs = conv.messages[last_msg_count:]
+                    est_current_tokens = last_turn_tokens + estimate_logical_tokens(
+                        delta_msgs
+                    )
+                if conv.maybe_compact(current_tokens=est_current_tokens):
+                    last_turn_tokens = None
 
-                resp_json, active_model_url = await _post_llm_with_retry(
-                    client,
-                    model_url=active_model_url,
-                    endpoint_pool=endpoint_pool,
-                    payload=payload,
-                    headers=llm_headers,
-                    max_retries=max_llm_retries,
-                )
+                turn_max_tokens = max_tokens
+                resp_json: dict[str, Any] | None = None
+                for ctx_attempt in range(3):
+                    payload: dict[str, Any] = {
+                        "model": model_name,
+                        "messages": conv.wire_messages(inline_base64=True),
+                        "tools": conv.tools,
+                        "parallel_tool_calls": False,
+                        "max_tokens": turn_max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                    }
+                    if resolved_provider == "sglang":
+                        payload["top_k"] = top_k
+                        payload["chat_template_kwargs"] = {
+                            "enable_thinking": thinking,
+                            "preserve_thinking": True,
+                        }
+                    try:
+                        resp_json, active_model_url = await _post_llm_with_retry(
+                            client,
+                            model_url=active_model_url,
+                            endpoint_pool=endpoint_pool,
+                            payload=payload,
+                            headers=llm_headers,
+                            max_retries=max_llm_retries,
+                        )
+                        break
+                    except ContextLengthExceededError as ctx_exc:
+                        forced_tokens = (
+                            ctx_exc.input_tokens
+                            if ctx_exc.input_tokens is not None
+                            else 10**9
+                        )
+                        compacted = conv.maybe_compact(
+                            current_tokens=max(forced_tokens, 10**9)
+                        )
+                        last_turn_tokens = None
+                        if compacted and ctx_attempt < 2:
+                            logger.info(
+                                "Context length exceeded on %s (in=%s max=%s); "
+                                "forced compaction and retrying turn %d",
+                                episode_key or sid,
+                                ctx_exc.input_tokens,
+                                ctx_exc.max_context_tokens,
+                                turns + 1,
+                            )
+                            continue
+                        if (
+                            ctx_exc.input_tokens is not None
+                            and ctx_exc.max_context_tokens is not None
+                            and ctx_attempt < 2
+                        ):
+                            headroom = (
+                                ctx_exc.max_context_tokens - ctx_exc.input_tokens - 128
+                            )
+                            if headroom >= 1024 and headroom < turn_max_tokens:
+                                logger.info(
+                                    "Clamping max_tokens %d -> %d on %s to fit %d context",
+                                    turn_max_tokens,
+                                    headroom,
+                                    episode_key or sid,
+                                    ctx_exc.max_context_tokens,
+                                )
+                                turn_max_tokens = headroom
+                                continue
+                        error_kind, reason = "context_limit", "context_limit"
+                        error_msg = str(ctx_exc)
+                        resp_json = None
+                        break
+
+                if resp_json is None:
+                    break
                 usage = resp_json.get("usage") or {}
-                usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-                usage_totals["completion_tokens"] += int(
-                    usage.get("completion_tokens") or 0
-                )
+                prompt_toks = int(usage.get("prompt_tokens") or 0)
+                comp_toks = int(usage.get("completion_tokens") or 0)
+                usage_totals["prompt_tokens"] += prompt_toks
+                usage_totals["completion_tokens"] += comp_toks
                 prompt_details = usage.get("prompt_tokens_details") or {}
                 usage_totals["cached_tokens"] += int(
                     prompt_details.get("cached_tokens") or 0
                 )
+                if prompt_toks > 0:
+                    last_turn_tokens = prompt_toks + comp_toks
+                    last_msg_count = len(conv.messages) + 1
 
                 choice = resp_json["choices"][0]
                 turns += 1
@@ -919,7 +1039,7 @@ def main() -> None:
     if args.context_management == "dynamic":
         compaction_max_messages = None
         if compaction_max_tokens is None:
-            compaction_max_tokens = 48000
+            compaction_max_tokens = 44000
     compaction = CompactionConfig(
         strategy=args.context_management,
         max_messages=compaction_max_messages,

@@ -9,11 +9,11 @@
 #     python /path/to/rpent_ppo/repos/RPent/tools/rl/serve.py \
 #     --config /path/to/sim_services_4env_sft_h100.yaml
 #
-# Capacity & VRAM budget (208 concurrent slots + 8 SAM3 across 8x 80GB H100):
-# - Per GPU: 8 LIBERO + 6 RoboTwin + 4 RoboLab + 8 MetaWorld + 1 SAM3
-# - Removing RoboDojo frees 2 IsaacSim workers/GPU, allowing 4 RoboLab workers/GPU
-#   (32 RoboLab total/node, ~46-50 GiB IsaacSim VRAM + ~2.5 GiB SAM3 + ~6-8 GiB
-#   MuJoCo/SAPIEN = ~58-62 GiB / 81.5 GiB per H100, leaving ~20 GiB headroom).
+# Capacity & VRAM budget (160 concurrent slots + 8 SAM3 across 8x 80GB H100):
+# - Per GPU: 8 LIBERO + 2 RoboTwin + 2 RoboLab + 8 MetaWorld + 1 SAM3
+# - Keeping Vulkan processes bounded to 32/node (16 RoboTwin SAPIEN + 16 RoboLab
+#   IsaacSim, staggered across GPUs) avoids NVIDIA kernel driver rm_lock contention
+#   (os_acquire_rwlock_read / down_interruptible) while keeping peak VRAM ~45-55 GiB.
 #
 # Pre-flight requirements on air-gapped clusters:
 # 1. Verify all 8 GPUs pass simultaneous Vulkan SimulationApp startup before assigning
@@ -80,12 +80,12 @@ simulators:
     host: 0.0.0.0
     port: 28562
     gpus: [0, 1, 2, 3, 4, 5, 6, 7]
-    workers: 48
+    workers: 16
     assets_path: /path/to/rpent_ppo/assets/robotwin
     sam3_endpoint: http://127.0.0.1:28520
     sam3_timeout_s: 600
     max_episodes_per_worker: 40
-    max_concurrent_spawns: 8
+    max_concurrent_spawns: 4
     sleepable: false
     env:
       ROBOTWIN_ASSETS_PATH: /path/to/rpent_ppo/assets/robotwin
@@ -97,8 +97,8 @@ simulators:
     python: /path/to/rpent_ppo/envs/robolab/bin/python
     host: 0.0.0.0
     port: 28564
-    gpus: [0, 1, 2, 3, 4, 5, 6, 7]
-    workers: 32
+    gpus: [4, 5, 6, 7, 0, 1, 2, 3]
+    workers: 16
     sam3_endpoint: http://127.0.0.1:28520
     sam3_timeout_s: 600
     max_episodes_per_worker: 30

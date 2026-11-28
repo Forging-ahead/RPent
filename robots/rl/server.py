@@ -828,7 +828,15 @@ class SimPoolManager:
             try:
                 if proc.poll() is None:
                     proc.kill()
-                    proc.wait(timeout=5)
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(
+                            "%s worker %d (pid=%d) did not exit within 15s after SIGKILL",
+                            self.environment,
+                            wid,
+                            proc.pid,
+                        )
             finally:
                 if scratch_dir is not None:
                     shutil.rmtree(scratch_dir, ignore_errors=True)

@@ -170,15 +170,15 @@ PYTHONPATH=/path/to/RPent python -m robots.rl.rollout \
   --max-turns 50 \
   --max-tokens 16384 \
   --context-management dynamic \
-  --compaction-max-tokens 48000 \
+  --compaction-max-tokens 44000 \
   --include-jaw-mm \
   --request-timeout-s 1200 \
   --resume
 ```
 
 Repeat with:
-- `robotwin`: `--sim-url http://<SIM_NODE_A_IP>:28562 --tasks-jsonl .../robotwin/train.jsonl --concurrency 48`
-- `robolab`: `--sim-url http://<SIM_NODE_A_IP>:28564 --tasks-jsonl .../robolab/train.jsonl --concurrency 32`
+- `robotwin`: `--sim-url http://<SIM_NODE_A_IP>:28562 --tasks-jsonl .../robotwin/train.jsonl --concurrency 16`
+- `robolab`: `--sim-url http://<SIM_NODE_A_IP>:28564 --tasks-jsonl .../robolab/train.jsonl --concurrency 16`
 - `metaworld`: `--sim-url http://<SIM_NODE_A_IP>:28565 --tasks-jsonl .../metaworld/mt50.jsonl --concurrency 64`
 
 ### Launching Remote `deepseek-v4.1-flash` Collectors (`--shard 1/2`, 128 Total Concurrency)

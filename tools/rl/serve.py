@@ -191,6 +191,9 @@ def main() -> None:
             )
 
         # 2. Start warm simulator pools (optional on router-only nodes)
+        # Track respawn metadata so a single crashed simulator pool auto-recovers
+        # instead of tearing down all other healthy simulators on the node.
+        sim_specs: dict[str, tuple[list[str], dict[str, str], str]] = {}
         sim_procs: list[tuple[str, str, subprocess.Popen]] = []
         for sim_name, sim_cfg in (cfg.get("simulators") or {}).items():
             sim_host = sim_cfg.get("host", host)
@@ -235,8 +238,10 @@ def main() -> None:
                 cmd.extend(["--assets-path", str(sim_cfg["assets_path"])])
             if sim_cfg.get("libero_type"):
                 cmd.extend(["--libero-type", str(sim_cfg["libero_type"])])
-            proc = _spawn(f"pool_{sim_name}", cmd, log_dir, sim_env)
-            procs.append((f"pool_{sim_name}", proc))
+            svc_name = f"pool_{sim_name}"
+            proc = _spawn(svc_name, cmd, log_dir, sim_env)
+            procs.append((svc_name, proc))
+            sim_specs[svc_name] = (cmd, sim_env, f"http://{sim_host}:{port}")
             sim_procs.append((sim_name, f"http://{sim_host}:{port}", proc))
 
         for sim_name, url, proc in sim_procs:
@@ -279,12 +284,27 @@ def main() -> None:
 
         logger.info("ALL SERVICES READY. Monitoring child processes...")
         while True:
-            for name, proc in procs:
+            for idx, (name, proc) in enumerate(list(procs)):
                 code = proc.poll()
                 if code is not None:
-                    raise RuntimeError(
-                        f"Service {name} exited unexpectedly with code {code}"
-                    )
+                    if name in sim_specs:
+                        cmd, sim_env, url = sim_specs[name]
+                        logger.error(
+                            "Simulator pool %s exited with code %s; restarting it without tearing down healthy pools",
+                            name,
+                            code,
+                        )
+                        new_proc = _spawn(name, cmd, log_dir, sim_env)
+                        procs[idx] = (name, new_proc)
+                        try:
+                            status = _wait_http_health(url, new_proc, timeout_s=600.0)
+                            logger.info("Restarted %s ready at %s: %s", name, url, status)
+                        except Exception:
+                            logger.exception("Restarted %s failed health check", name)
+                    else:
+                        raise RuntimeError(
+                            f"Service {name} exited unexpectedly with code {code}"
+                        )
             time.sleep(2.0)
     except Exception:
         logger.exception("Service supervisor failed; shutting down")

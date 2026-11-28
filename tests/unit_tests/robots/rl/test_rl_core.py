@@ -1055,3 +1055,15 @@ def test_rollout_atomic_save_retry_and_sft_export(tmp_path):
         hf_sample["messages"][2]["tool_calls"][0]["function"]["arguments"], dict
     )
     assert hf_sample["messages"][2]["reasoning_content"] == "Move toward target first."
+
+    # Verify HTTP 400 context-length error parser & automatic compaction recovery
+    from robots.rl.rollout import _parse_context_length_error
+
+    parsed_ctx = _parse_context_length_error(
+        '{"message":"Requested token count exceeds the model\'s maximum context length of 65536 tokens. '
+        'You requested a total of 71436 tokens: 55052 tokens from the input messages and 16384 tokens for the completion."}'
+    )
+    assert parsed_ctx is not None
+    assert parsed_ctx.input_tokens == 55052
+    assert parsed_ctx.max_context_tokens == 65536
+    assert _parse_context_length_error('{"message":"invalid json"}') is None
