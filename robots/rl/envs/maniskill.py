@@ -47,30 +47,6 @@ class ToolTipBatch(ActionBatch):
         return self._execute_actions(actions)
 
 
-def tool_profile(toolkit, capabilities):
-    """Select the shared action batch and cameras supported by this robot."""
-    if capabilities.get("mobile"):
-        batch = MobileBatch(toolkit).execute_actions
-        schema = batch.input_schema
-        schema["$defs"]["BaseMove"]["properties"]["vy"].update(
-            minimum=0,
-            maximum=0,
-            description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
-        )
-        batch = replace(batch, _input_schema=schema)
-    elif not capabilities["gripper"]:
-        batch = ToolTipBatch(toolkit).execute_actions
-    else:
-        batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
-        batch = batch_type(toolkit).execute_actions
-    rgb = capabilities["rgb_cameras"]
-    return batch, (
-        rgb,
-        rgb if capabilities["segment"] else (),
-        capabilities["depth_cameras"],
-    )
-
-
 def _task_hint(env_id, image_size=512):
     instructions = (
         Path(__file__).resolve().parents[1] / "prompts" / "maniskill_tasks.md"
@@ -618,6 +594,37 @@ def floating_hand(episode, agent):
 
 class ManiSkillRLPrimitives(RecordedPerception):
     """Apply shared Cartesian and mobile control to the native robot's controllers."""
+
+    use_requested_display_size = True
+
+    @staticmethod
+    def tool_profile(toolkit, perception):
+        """Select the shared action batch and cameras supported by this robot."""
+        if perception is None:
+            raise ValueError(
+                "ManiSkill tool declarations require the active robot and cameras"
+            )
+        capabilities = perception.tool_capabilities
+        if capabilities.get("mobile"):
+            batch = MobileBatch(toolkit).execute_actions
+            schema = batch.input_schema
+            schema["$defs"]["BaseMove"]["properties"]["vy"].update(
+                minimum=0,
+                maximum=0,
+                description="Fetch differential drive requires zero lateral velocity. Turn before driving sideways.",
+            )
+            batch = replace(batch, _input_schema=schema)
+        elif not capabilities["gripper"]:
+            batch = ToolTipBatch(toolkit).execute_actions
+        else:
+            batch_type = DualArmBatch if capabilities["dual_arm"] else ActionBatch
+            batch = batch_type(toolkit).execute_actions
+        rgb = capabilities["rgb_cameras"]
+        return batch, (
+            rgb,
+            rgb if capabilities["segment"] else (),
+            capabilities["depth_cameras"],
+        )
 
     BASE_LIMITS = RoboCasaRLPrimitives.BASE_LIMITS
     move_base = RoboCasaRLPrimitives.move_base

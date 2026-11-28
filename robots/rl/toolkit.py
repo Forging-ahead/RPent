@@ -324,14 +324,9 @@ def episode_tools(
 ) -> list[Tool]:
     """Build the centimetre-normalized tool declarations for ``environment``."""
     owner = RecordedPerception if perception is None else perception
-    if environment == "maniskill":
-        from robots.rl.envs.maniskill import tool_profile
-
-        if perception is None:
-            raise ValueError(
-                "ManiSkill tool declarations require the active robot and cameras"
-            )
-        batch, camera_groups = tool_profile(toolkit, perception.tool_capabilities)
+    profile = getattr(primitive_owner(environment), "tool_profile", None)
+    if profile is not None:
+        batch, camera_groups = profile(toolkit, perception)
     else:
         batch_type = {
             "libero": ActionBatch,
@@ -418,9 +413,13 @@ class RLToolkit(Toolkit):
             record_artifacts=self.record_artifacts,
             **runtime_kwargs,
         )
-        if environment in {"robolab", "maniskill"} or (
-            environment in {"libero", "robocasa", "metaworld"}
-            and image_size != NATIVE_SIZE
+        if (
+            getattr(self._primitives, "use_requested_display_size", False)
+            or environment == "robolab"
+            or (
+                environment in {"libero", "robocasa", "metaworld"}
+                and image_size != NATIVE_SIZE
+            )
         ):
             self._primitives.display_size = image_size
         self._task = self._primitives.env.get_task_language()
