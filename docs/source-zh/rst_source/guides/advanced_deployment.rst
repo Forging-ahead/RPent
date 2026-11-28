@@ -161,3 +161,14 @@ SAM3 服务只加载一次模型，可以由多个 RPent 运行复用。
    ssh -N -L 8000:127.0.0.1:8000 USER@HOST
 
 在本机浏览器打开 ``http://127.0.0.1:8000``。保持 SSH 连接和服务器上的 RPent 进程运行；任务操作见 :doc:`dashboard`。
+
+托管模型端点
+------------
+
+使用同一个 rollout 客户端连接运行中的仿真池，在客户端环境中加载 API 密钥。
+
+.. code-block:: bash
+
+   python -m robots.rl.rollout --model-url https://api.deepseek.com --model-name deepseek-flash \
+     --api-key-env DEEPSEEK_API_KEY --reasoning-effort high --max-tokens 65536 \
+     --sim-url http://127.0.0.1:28567 --tasks-jsonl tasks.jsonl --output-dir outputs

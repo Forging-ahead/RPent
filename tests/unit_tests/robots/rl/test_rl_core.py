@@ -298,3 +298,117 @@ def test_sim_pool_replace_worker_is_idempotent():
         assert spawned == [0]
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("hosted", [True, False])
+def test_rollout_model_settings_and_image_transport(monkeypatch, hosted):
+    import asyncio
+    import json
+    from functools import partial
+
+    import httpx
+
+    from robots.rl.rollout import run_episode
+    from robots.rl.server import BINARY_EXECUTE_MEDIA_TYPE, pack_execute_response
+
+    png = encode_png(np.zeros((16, 16, 3), dtype=np.uint8))
+    tool = {"name": "view_env", "parameters": {"type": "object"}}
+    calls = []
+
+    def respond(req):
+        body = json.loads(req.content)
+        if req.url.host == "model":
+            calls.append(body)
+            assert req.headers.get("Authorization") == (
+                "Bearer test" if hosted else None
+            )
+            if len(calls) == 1:
+                msg = {
+                    "tool_calls": [
+                        {"id": cid, "function": {"name": "view_env", "arguments": "{}"}}
+                        for cid in ("a", "b")
+                    ],
+                    "reasoning_content": "two calls",
+                }
+            elif len(calls) == 2:
+                retry = body["messages"][3:]
+                if hosted:
+                    assert [m["tool_call_id"] for m in retry] == ["a", "b"]
+                    assert all(m["role"] == "tool" for m in retry)
+                else:
+                    assert len(retry) == 1 and retry[0]["role"] == "user"
+                assert all("No tool executed" in m["content"] for m in retry)
+                msg = {
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "function": {"name": "view_env", "arguments": "{}"},
+                        }
+                    ],
+                    "reasoning_content": "inspect",
+                }
+            else:
+                msg = {"content": "finished"}
+            return httpx.Response(200, json={"choices": [{"message": msg}]})
+        assert "Authorization" not in req.headers
+        if req.url.path.endswith("/open"):
+            assert body["image_size"] == 512
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "s",
+                    "environment": "libero",
+                    "system_prompt": "system",
+                    "user_message": "task",
+                    "initial_observation": "{}",
+                    "done": False,
+                    "success": False,
+                    "truncated": False,
+                    "tools": [{"type": "function", "function": tool}],
+                },
+            )
+        if req.url.path.endswith("/execute"):
+            meta = {
+                "done": False,
+                "success": False,
+                "truncated": False,
+                "text": "observation",
+            }
+            return httpx.Response(
+                200,
+                headers={"Content-Type": BINARY_EXECUTE_MEDIA_TYPE},
+                content=pack_execute_response(meta, [png]),
+            )
+        assert req.url.path.endswith("/close")
+        return httpx.Response(200, json={})
+
+    client = partial(httpx.AsyncClient, transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    asyncio.run(
+        run_episode(
+            model_url="https://model",
+            model_name="policy",
+            api_key="test" if hosted else None,
+            reasoning_effort="high" if hosted else None,
+            sim_url="http://sim",
+            task={"seed": 0},
+            image_size=512,
+        )
+    )
+    first, _, final = calls
+    assert first.get("reasoning_effort") == ("high" if hosted else None)
+    assert ("top_k" in first) == ("chat_template_kwargs" in first) == (not hosted)
+    assert first.get("tool_choice") == ("auto" if hosted else None)
+    messages = final["messages"]
+    first_image_part = messages[-1]["content"][0]["text"]
+    assert first_image_part.startswith("<tool_result " if hosted else "<tool_response>")
+    assert (
+        next(m for m in reversed(messages) if m["role"] == "assistant")[
+            "reasoning_content"
+        ]
+        == "inspect"
+    )
+    assert any(
+        p.get("image_url", {}).get("url", "").startswith("data:image/png;base64,")
+        for p in messages[-1]["content"]
+    )

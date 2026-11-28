@@ -211,3 +211,14 @@ In a local terminal, forward the port, replacing ``USER@HOST`` with the server l
    ssh -N -L 8000:127.0.0.1:8000 USER@HOST
 
 Open ``http://127.0.0.1:8000`` in your local browser. Keep the SSH connection and server-side RPent process running; see :doc:`dashboard` for task controls.
+
+Hosted model endpoints
+----------------------
+
+Use the same rollout client with a running simulator pool. Load the API key in the client environment.
+
+.. code-block:: bash
+
+   python -m robots.rl.rollout --model-url https://api.deepseek.com --model-name deepseek-flash \
+     --api-key-env DEEPSEEK_API_KEY --reasoning-effort high --max-tokens 65536 \
+     --sim-url http://127.0.0.1:28567 --tasks-jsonl tasks.jsonl --output-dir outputs
