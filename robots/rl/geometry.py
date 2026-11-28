@@ -31,7 +31,6 @@ MIN_SURFACE_POINTS = 10
 #: Major/minor xy variance ratio required to report a surface direction.
 _AXIS_RATIO = 2.0
 
-IMAGE_SIZES = (1024, 512, 256)
 NATIVE_SIZE = 1024
 
 
@@ -320,18 +319,6 @@ def encode_png(
     buf = io.BytesIO()
     pil.save(buf, format="PNG", compress_level=1)
     return buf.getvalue()
-
-
-def resize_image(data: bytes, size: int) -> bytes:
-    """Resize one planner image without changing the recorded native image."""
-    with Image.open(io.BytesIO(data)) as image:
-        if image.size == (size, size):
-            return data
-        output = io.BytesIO()
-        image.resize((size, size), Image.Resampling.LANCZOS).save(
-            output, format="PNG", compress_level=1
-        )
-        return output.getvalue()
 
 
 def map_box(

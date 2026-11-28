@@ -29,7 +29,6 @@ from robots.rl.geometry import (
     encode_png,
     map_box,
     map_pixel,
-    resize_image,
     surface_geometry,
     world_from_depth,
 )
@@ -77,8 +76,9 @@ def test_geometry_backproject_and_png():
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(file_id_for(png)) == 6
     assert count_image_tokens(png) > 0
-    resized = resize_image(png, 64)
+    resized = encode_png(rgb, size=64)
     assert resized[:8] == b"\x89PNG\r\n\x1a\n"
+    assert count_image_tokens(resized) == 4
     assert map_pixel([32, 32], (64, 64), (128, 128)) == [65, 65]
     assert map_box([16, 16, 48, 48], (64, 64), (128, 128)) == [32, 32, 96, 96]
 

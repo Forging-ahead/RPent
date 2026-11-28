@@ -40,10 +40,9 @@ logger = get_logger("libero_env_server")
 
 os.environ.setdefault("ROBOT_PLATFORM", "LIBERO")
 
-# torch and LiberoEnv are only imported at call time (after --cuda-device
-# sets CUDA_VISIBLE_DEVICES in main()); LiberoEnv transitively imports torch.
+# LiberoEnv (and its transitive torch dependency) is only imported at call time
+# (after --cuda-device configures EGL/CUDA in main()).
 if TYPE_CHECKING:
-    import torch  # noqa: F401  (transitive dep of LiberoEnv; type-check only)
     from rlinf.envs.sim.libero.libero_env import LiberoEnv
 
 

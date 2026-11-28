@@ -3,15 +3,19 @@
 #   python tools/rl/serve.py --config /path/to/sim_services.yaml
 #
 # Each service runs in its own isolated Python virtual environment so simulator
-# dependencies (MuJoCo/LIBERO, SAPIEN/RoboTwin, SAM3) stay decoupled from the
-# pure-RL training environment.
+# dependencies (MuJoCo/LIBERO, SAPIEN/RoboTwin, IsaacSim/RoboDojo/RoboLab, SAM3)
+# stay decoupled from the pure-RL training environment.
+#
+# IMPORTANT: Keep global env.PYTHONPATH restricted to RPent only, and scope RLinf
+# exclusively under simulators.libero.env.PYTHONPATH so it never shadows RoboDojo's
+# installed rlinf.envs.sim.robodojo package.
 
 host: 127.0.0.1
 log_dir: /path/to/workspace/runs/sim_services
 
 env:
   LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64
-  PYTHONPATH: /path/to/RPent:/path/to/RLinf
+  PYTHONPATH: /path/to/RPent
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   OMP_NUM_THREADS: "4"
 
@@ -33,8 +37,11 @@ simulators:
     libero_type: pro
     max_episodes_per_worker: 30
     env:
+      PYTHONPATH: /path/to/RPent:/path/to/RLinf
       LIBERO_CONFIG_PATH: /path/to/assets/libero-config
+      ROBOT_PLATFORM: LIBERO
       MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
 
   robotwin:
     python: /path/to/envs/robotwin/bin/python
@@ -45,6 +52,36 @@ simulators:
     max_episodes_per_worker: 30
     env:
       ROBOTWIN_ASSETS_PATH: /path/to/assets/robotwin
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+
+  # robodojo:
+  #   python: /path/to/envs/robodojo/bin/python
+  #   port: 28563
+  #   gpus: [4, 5, 6, 7]
+  #   workers: 4
+  #   assets_path: /path/to/assets/robodojo
+  #   max_concurrent_spawns: 2
+  #   max_episodes_per_worker: 30
+  #   sleepable: false
+  #   env:
+  #     OMNI_KIT_ACCEPT_EULA: Y
+  #     ROBODOJO_ASSETS_ROOT: /path/to/assets/robodojo
+  #     VK_ICD_FILENAMES: /etc/vulkan/icd.d/nvidia_icd.json
+  #     RPENT_ISAAC_KIT_ARGS: --/rtx/verifyDriverVersion/enabled=false --/ngx/enabled=false --/rtx/post/aa/op=0 --/rtx-transient/dlssg/enabled=false
+
+  # robolab:
+  #   python: /path/to/envs/robolab/bin/python
+  #   port: 28564
+  #   gpus: [7]
+  #   workers: 1
+  #   max_concurrent_spawns: 1
+  #   max_episodes_per_worker: 30
+  #   sleepable: false
+  #   env:
+  #     OMNI_KIT_ACCEPT_EULA: Y
+  #     VK_ICD_FILENAMES: /etc/vulkan/icd.d/nvidia_icd.json
+  #     RPENT_ISAAC_KIT_ARGS: --/rtx/verifyDriverVersion/enabled=false --/ngx/enabled=false --/rtx/post/aa/op=0 --/rtx-transient/dlssg/enabled=false
 
   # metaworld:
   #   python: /path/to/envs/metaworld/bin/python
@@ -55,14 +92,3 @@ simulators:
   #   env:
   #     MUJOCO_GL: egl
   #     PYOPENGL_PLATFORM: egl
-
-  # Uncomment after following the RoboLab installation in robots/rl/README.md.
-  # Export OMNI_KIT_ACCEPT_EULA=Y after accepting the NVIDIA Omniverse EULA.
-  # robolab:
-  #   python: /path/to/envs/robolab/bin/python
-  #   port: 28566
-  #   gpus: [7]
-  #   workers: 1
-  #   max_concurrent_spawns: 1
-  #   max_episodes_per_worker: 30
-  #   sleepable: false

@@ -14,9 +14,10 @@
 
 """Standalone async rollout and evaluation runner over any OpenAI/SGLang endpoint.
 
-Uses the exact same ``EpisodeConversation`` + ``SlidingWindowCompaction`` wire
-format and tool-validation loop as RLinf training so standalone evaluation and
-data collection stay 100% consistent with RL rollouts.
+Uses the exact same Harness v2 ``EpisodeConversation`` (step-0 opening images,
+compact feedback, optional ``jaw_mm``, ``execute_actions(..., observe=...)``,
+and ``base``/``dynamic`` compaction) and tool-validation loop as RLinf training
+so standalone evaluation and data collection stay 100% consistent with RL rollouts.
 """
 
 from __future__ import annotations
