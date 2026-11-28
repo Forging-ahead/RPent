@@ -469,6 +469,9 @@ class RLToolkit(Toolkit):
         obs = ToolResult(
             data={"task": self._task, "state": {"step": step, **self._robot_state()}}
         )
+        sensors = getattr(self._primitives, "tool_capabilities", None)
+        if sensors is not None:
+            obs.data["sensors"] = sensors
         obs = self._model_feedback(obs)
         self._count_images(obs)
         return obs

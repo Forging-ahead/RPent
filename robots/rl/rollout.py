@@ -62,7 +62,7 @@ async def run_episode(
     """Run one standalone episode against ``model_url`` (OpenAI chat) and ``sim_url``."""
     model_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     model_options = (
-        {"reasoning_effort": reasoning_effort}
+        {"reasoning_effort": reasoning_effort, "tool_choice": "auto"}
         if reasoning_effort is not None
         else {
             "temperature": temperature,
@@ -192,6 +192,7 @@ async def run_episode(
                     tool_call_id=parsed_calls[0]["id"],
                     text=executed["text"],
                     images=images,
+                    qwen_image_frame=reasoning_effort is None,
                 )
                 status = executed
                 if executed.get("infrastructure_error"):

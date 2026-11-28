@@ -232,4 +232,4 @@ For a single task, write one JSON line and set the hosted model credential in
      --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
      --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
      --tasks-jsonl task.jsonl --output-dir outputs/maniskill \
-     --max-turns 64 --max-tokens 4096 --record-artifacts
+     --max-turns 64 --max-tokens 65536 --record-artifacts

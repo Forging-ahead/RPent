@@ -123,7 +123,7 @@ python -m robots.rl.rollout --model-url https://api.deepseek.com \
   --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
   --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
   --tasks-jsonl maniskill-seed0.jsonl --output-dir outputs/maniskill \
-  --concurrency 1 --max-turns 64 --max-tokens 4096 --record-artifacts
+  --concurrency 1 --max-turns 64 --max-tokens 65536 --record-artifacts
 ```
 
 Each row starts one episode with the task's native step limit. Set `--concurrency` to the number of available workers to run independent tasks in parallel. The rollout writes per-task results to `ep_*/outcome.json` and the overall success rate to `summary.json`.

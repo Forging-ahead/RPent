@@ -398,7 +398,10 @@ def test_rollout_model_settings_and_image_transport(monkeypatch, hosted):
     first, _, final = calls
     assert first.get("reasoning_effort") == ("high" if hosted else None)
     assert ("top_k" in first) == ("chat_template_kwargs" in first) == (not hosted)
+    assert first.get("tool_choice") == ("auto" if hosted else None)
     messages = final["messages"]
+    first_image_part = messages[-1]["content"][0]["text"]
+    assert first_image_part.startswith("<tool_result " if hosted else "<tool_response>")
     assert (
         next(m for m in reversed(messages) if m["role"] == "assistant")[
             "reasoning_content"

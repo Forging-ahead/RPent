@@ -2,19 +2,19 @@
 
 ## DrawSVG-v1
 
-Clear the pen from the outline and keep that base-camera frame as a map. Segment the black path once.
-Back-project the centerline pixels at both ends of the first visible edge in that frame, then batch hover, lower
-to canvas height and trace. For the next edge reuse the last endpoint and back-project the next corner. Join
-consecutive edges at drawing height, lift across gaps, and cover interior strokes. Compare the ink with the map
-after each group of strokes.
+Look once with the base camera. If the pen hides the outline, make the first move a vertical lift of about
+12 cm from its measured pose, keeping x, y and wrist orientation. Keep the clear view as your map and segment
+the black path once. Back-project both centerline endpoints of one visible edge. As soon as you have them,
+batch a hover over the first, a descent to its measured canvas height, and a stroke to the second. Continue
+edge by edge, reusing the last endpoint. Lift across gaps and check the ink against the map for missing strokes.
 
 ## DrawTriangle-v1
 
-Move the pen up and clear of the outline. Use that unobstructed base view for all three corners. This triangle
-is equilateral. Back-project the two clearest black centerline junctions. Check the third against the
-equilateral apex on the visible side and verify all three side lengths agree within about 1 cm before touching.
-Hover over the verified corner, lower vertically, and follow each edge through its midpoint to the next corner
-at canvas height.
+Look at the triangle with the base camera. If the pen hides a corner, lift it over a clear margin and take a
+fresh view. Keep that frame as your map. Back-project the two clearest corners on the black centerline.
+Once you have one edge, hover above its first corner, lower to the measured canvas height and trace the edge
+through its midpoint. Recover the third corner from the map, using the equilateral apex on the visible side
+as a check. Trace the remaining two edges through their midpoints and close the triangle at the first corner.
 
 ## FMBAssembly1Easy-v1
 
@@ -91,11 +91,10 @@ the object center rises relative to the grasp. Keep holding.
 
 ## PlaceSphere-v1
 
-Measure the sphere and shallow bin before moving. Back-project the top 1 cm of the sphere mask for grasp XY;
-the equator is halfway between tabletop and sphere top. The reset pose is the approach waypoint. Use two
-batches: [move_to(equator XYZ directly), set_gripper(0)] then [move_to(bin center XY, rim top + sphere
-radius + 0.3 cm), set_gripper(1)]. Keep measured wrist orientation. A partial close on the ball is contact.
-The diagonal carry supplies the lift. Reserve the final 10 native steps for opening and settling in the bin.
+Segment “blue sphere” and “white shallow bin tray”. Use the top 1 cm of the sphere mask for grasp XY, and
+the whole tray mask for bin center XY. Keep measurements to 0.1 cm; the sphere must settle within 0.5 cm
+of the center. With the starting wrist, move directly to the sphere equator and close. After contact,
+batch a diagonal move to bin center at rim top + sphere radius + 0.3 cm with full opening.
 
 ## PlugCharger-v1
 
@@ -135,8 +134,9 @@ cube mid-height on all four strokes. Measure before grasp so each slide can foll
 
 ## PushCube-v1
 
-Close the jaws and omit orientation_rpy for approach and push. Reach contact height just behind the cube on the
-cube-to-goal line, then push along that line at the same height.
+Segment “blue cube” and “red and white goal target”. Close the jaws and keep the measured wrist. Approach
+5 cm behind the cube on the cube-to-goal line at cube top + 5 cm. Descend there to cube top − 0.2 cm,
+then sweep toward the target along that same line at this fixed height.
 
 ## PushT-v1
 
@@ -151,20 +151,19 @@ gray target.
 ## PutCarrotOnPlateInScene-v1
 
 For this fixed 512px Bridge camera use the visible [row,col]: r=(row-256)/100, c=(col-256)/100, d=1+.158*r.
-Table-object XY in mount cm is about [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Measure the thick orange
-body and plate first. While still at the initial TCP HEIGHT, move above the thick body and finish the crosswise
-wrist turn. Only then descend straight to z≈2 cm with that wrist fixed and close. Once the close is blocked on
-the carrot, carry diagonally straight to the plate center at z≈4–5 cm and open there. Skip the separate vertical
-test lift.
+Table-object XY in mount cm is about [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Segment “thick orange
+carrot body” and “yellow plate” once. Apply the formula to both box centers and save XY to 0.1 cm. Move
+above the carrot at the starting height with the jaws across its width. Descend to z≈2 cm and close.
+On contact carry straight to plate center at z≈4.5 cm and open.
 
 ## PutEggplantInBasketScene-v1
 
 In the fixed 512px sink view take the eggplant body's [row,col]. With r=(row-256)/100, c=(col-256)/100,
-d=1+.157*r, approximate its XY at z=8 cm by [(29.2+3.68*c-4.25*r)/d,(-7.75-8.2*c-5.22*r)/d]. Mark the center of
-the yellow basket floor in the FIRST view. Apply the same formula to that pixel. Convert its output (x,y) to the
-higher basket plane as (-.3+.774*(x+.3), -21+.774*(y+21)). After gripping and lifting clear of the rim, batch:
-move over that basket XY, lower there to z≈18 cm, open. Use the recorded basket position even when the carried
-eggplant obscures it.
+d=1+.157*r, approximate its XY at z=8 cm by [(29.2+3.68*c-4.25*r)/d,(-7.75-8.2*c-5.22*r)/d]. Segment
+“eggplant” and “yellow basket” once. Save the basket floor center from this view: apply the same formula,
+then convert (x,y) to (-.3+.774*(x+.3), -21+.774*(y+21)). Move above the eggplant at the starting height.
+Descend to z≈8 cm and close even if contact stops the descent. Lift clear of the rim, move over the saved
+basket XY, lower to z≈18 cm and open.
 
 ## PutSpoonOnTableClothInScene-v1
 
@@ -193,26 +192,25 @@ with this grip; check whether the cube rises before considering reopening.
 
 ## StackCube-v1
 
-The tabletop cubes have 4 cm edges. Use two batches. From the initial clear wrist, move to red's segmented XY
-(round to 0.1 cm), z = table height + 2.1 cm, then close. On finger contact the lift and carry are one diagonal
-move followed by full opening. Use green's measured top and the physical red half-edge of 2.0 cm: the release
-TCP z is green top + 2.0 + 1.5 cm. For release XY aim inside green's top, toward red by up to 1 cm in x and 1.5
-cm in y. Keep wrist orientation throughout. Open immediately on arrival to let red settle on green within
-{max_episode_steps} steps.
+Segment “red cube” and “green cube” once; save XY to 0.1 cm and green's top height. Use two batches with
+the starting wrist. First move directly to red XY at table height + 2.1 cm, then close. On contact move
+diagonally to green top + 3.5 cm, aiming inside green's top toward red by up to 1 cm in x and 1.5 cm
+in y. Include full opening in this second batch to release within {max_episode_steps} steps.
 
 ## StackGreenCubeOnYellowCubeBakedTexInScene-v1
 
 For the fixed 512px camera use cube centers: r=(row-256)/100, c=(col-256)/100, d=1+.158*r. Table XY in mount cm
-is [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Start about 5 cm above green's top. Lower directly to its
-mid-height and close. Both cubes are 3 cm tall. Lift just high enough to clear yellow and transfer at that
-height. Center green over yellow and use the measured grasp offset to lower its underside onto yellow's top.
-Batch that contact-height move with full opening before step 60.
+is [(31.8+4.86*c-4.55*r)/d,(1.6-8.8*c-5.04*r)/d]. Segment “green block” and “yellow block” once. Use the two
+box centers to save XY to 0.1 cm, then move above green with the starting wrist. Lower to its mid-height
+and close. Both cubes are 3 cm tall. Lift enough to clear yellow, transfer to its saved XY, then lower
+until green rests on yellow and open in the same batch before step 60.
 
 ## StackPyramid-v1
 
-Choose the red and green base positions before moving. When one base cube is already stable, place the other
-beside it and leave the pair in place. Pick up blue only after verifying the base, then release it over the
-midpoint at the measured height of the two cube tops.
+Segment “green cube”, “red cube” and “blue cube” separately in the first view; save their XY. Keep green
+fixed. Place red one cube width beside green with the other axis aligned, open fully, then lift. Verify the
+two base masks once by color. As soon as the cubes are adjacent, grasp blue at its saved XY. Place it over
+the midpoint of the two measured base centers at base top + half a cube edge, then open.
 
 ## TwoRobotPickCube-v1
 
