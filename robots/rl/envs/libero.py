@@ -16,19 +16,73 @@
 
 from __future__ import annotations
 
+import itertools
 import os
-from typing import Any
+from dataclasses import dataclass
+from typing import Annotated, Any
 
 import numpy as np
+from pydantic import Field
 from scipy.spatial.transform import Rotation
 
 from robots.rl import geometry
-from robots.rl.control import CartesianServo, ControlConfig, Measurement, _clip_norm
 from robots.rl.geometry import Coordinates, grasp_axes
 from robots.rl.perception import RecordedPerception
+from rpent.tools import ToolResult, tool
 
 SIM_CAMERAS: dict[str, str] = {"agentview": "agentview", "wrist": "robot0_eye_in_hand"}
 IMAGE_SIZE = 1024
+
+
+@dataclass(frozen=True)
+class ControlConfig:
+    """Backend servo limits; planners never set these."""
+
+    position_step_m: float = 0.03
+    rotation_step_rad: float = 0.12
+    position_tolerance_m: float = 0.004
+    rotation_tolerance_rad: float = 0.02
+    settle_speed_m: float = 0.001
+    settle_speed_rad: float = 0.005
+    max_motion_steps: int = 300
+    stall_steps: int = 15
+    stall_progress_m: float = 0.002
+    stall_progress_rad: float = 0.01
+    opening_tolerance: float = 0.08
+    max_gripper_steps: int = 40
+    settle_steps: int = 3
+    settle_opening: float = 0.01
+    segment_min_score: float = 0.2
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """Measured end-effector pose and normalized gripper opening."""
+
+    xyz: np.ndarray
+    rotation: np.ndarray
+    opening: float
+
+    def state(self) -> dict[str, Any]:
+        return {
+            "pose": {
+                "xyz": [round(float(value), 4) for value in self.xyz],
+                "orientation_rpy": geometry.rpy_of(self.rotation),
+            },
+            "opening": round(self.opening, 3),
+        }
+
+
+def _clip_norm(vector: np.ndarray, limit: float) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    return vector if norm <= limit else vector * (limit / norm)
+
+
+def _stalled(errors: list[tuple[float, float]], config: ControlConfig) -> bool:
+    if len(errors) <= config.stall_steps:
+        return False
+    (old_d, old_a), (d, a) = errors[-1 - config.stall_steps], errors[-1]
+    return old_d - d < config.stall_progress_m and old_a - a < config.stall_progress_rad
 
 
 class LocalLiberoEnv:
@@ -110,7 +164,7 @@ class LocalLiberoEnv:
         self._facade.close()
 
 
-class LiberoRLPrimitives(CartesianServo, RecordedPerception):
+class LiberoRLPrimitives(RecordedPerception):
     """Servo one LIBERO Franka Panda arm and query recorded RGB-D views."""
 
     cameras = tuple(SIM_CAMERAS)
@@ -166,6 +220,14 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
             xyz=np.asarray(control["xyz"], dtype=np.float64),
             rotation=np.asarray(control["rotation"], dtype=np.float64),
             opening=min(1.0, self._finger_gap() / self._open_gap),
+        )
+
+    def measure(self) -> Measurement:
+        native = self._measure_native()
+        return Measurement(
+            self.coordinates.points(native.xyz),
+            self.coordinates.orientation(native.rotation @ self.tool_rotation),
+            native.opening,
         )
 
     def robot_state(self) -> dict[str, Any]:
@@ -238,5 +300,131 @@ class LiberoRLPrimitives(CartesianServo, RecordedPerception):
             float(np.linalg.norm(rotation_error)),
         )
 
-    def _command_gripper(self, action, opening, error, within):
-        action[6] = 0.0 if within else float(-np.sign(error))
+    @tool(
+        json_schema_extra={
+            "additionalProperties": False,
+            "anyOf": [
+                {"required": ["xyz"], "properties": {"xyz": {"type": "array"}}},
+                {
+                    "required": ["orientation_rpy"],
+                    "properties": {"orientation_rpy": {"type": "array"}},
+                },
+            ],
+        }
+    )
+    def move_to(
+        self,
+        xyz: Annotated[list[float], Field(min_length=3, max_length=3)] | None = None,
+        orientation_rpy: Annotated[list[float], Field(min_length=3, max_length=3)]
+        | None = None,
+    ) -> ToolResult:
+        """Servo the grip_site toward an absolute world pose, without collision avoidance. Supply xyz, orientation_rpy, or both; an omitted part keeps its measured value at the start of this action. The gripper keeps its previous opening target. Returns reached only within 4mm and 0.02rad; partial means the target was not reached and reports a reason. Use the returned measured pose, never assume the command succeeded. Example: {"xyz":[0.1,0,0.3],"orientation_rpy":[3.14159265,0,0]}.
+
+        Args:
+            xyz: Absolute grip-site position [x,y,z] in world metres; three finite numbers.
+            orientation_rpy: Absolute grip-site [roll,pitch,yaw] in radians, fixed world-axis XYZ: R=Rz(yaw)@Ry(pitch)@Rx(roll). [pi,0,yaw] points the approach axis down. Omit to keep the complete measured rotation.
+        """
+        if self.ended:
+            return ToolResult(data={"error": "episode_ended"})
+        if xyz is None and orientation_rpy is None:
+            return ToolResult(data={"error": "Supply xyz, orientation_rpy, or both."})
+        start = self.measure()
+        target = self.coordinates.world_position(
+            start.xyz if xyz is None else np.asarray(xyz, dtype=np.float64)
+        )
+        goal = (
+            self.coordinates.world_orientation(start.rotation)
+            if orientation_rpy is None
+            else self.coordinates.world_orientation(
+                Rotation.from_euler("xyz", orientation_rpy).as_matrix()
+            )
+        ) @ self.tool_rotation.T
+        config = self._config
+        errors: list[tuple[float, float]] = []
+        reason = None
+        previous = self._measure_native()
+        for steps in itertools.count():
+            current = self._measure_native()
+            action, distance, angle = self._pose_action(current, target, goal)
+            errors.append((distance, angle))
+            settled = (
+                np.linalg.norm(current.xyz - previous.xyz) < config.settle_speed_m
+                and Rotation.from_matrix(
+                    current.rotation @ previous.rotation.T
+                ).magnitude()
+                < config.settle_speed_rad
+            )
+            previous = current
+            within = (
+                distance < config.position_tolerance_m
+                and angle < config.rotation_tolerance_rad
+            )
+            stalled = _stalled(errors, config)
+            if within and (settled or stalled or steps >= config.max_motion_steps):
+                break
+            if self.ended:
+                reason = self._ended_reason()
+            elif steps >= config.max_motion_steps:
+                reason = "max_steps"
+            elif stalled:
+                reason = "stalled"
+            if reason is not None:
+                break
+            self._step(action)
+        return ToolResult(
+            data={
+                "status": "reached" if reason is None else "partial",
+                **({} if reason is None else {"reason": reason}),
+                "env_steps": steps,
+                "position_error_m": round(distance, 4),
+                "rotation_error_rad": round(angle, 3),
+            }
+        )
+
+    @tool
+    def set_gripper(
+        self, opening: Annotated[float, Field(ge=0.0, le=1.0)]
+    ) -> ToolResult:
+        """Drive the gripper to a normalized opening while holding the end-effector pose. Closing on an object stops early and reports the measured opening; contact does not imply a stable grasp. The target stays in effect during later moves. Returns reached/partial/error, measured pose/opening, residual opening error and environment steps. Example: {"opening":1}.
+
+        Args:
+            opening: Target opening from 0 (closed) to 1 (fully open).
+        """
+        if self.ended:
+            return ToolResult(data={"error": "episode_ended"})
+        config = self._config
+        hold = self._measure_native()
+        hold_xyz = hold.xyz.copy()
+        previous, still, reason = hold.opening, 0, None
+        for steps in itertools.count():
+            current = self._measure_native()
+            error = opening - current.opening
+            still = (
+                still + 1
+                if abs(current.opening - previous) < config.settle_opening
+                else 0
+            )
+            previous = current.opening
+            settled = still >= config.settle_steps
+            within = abs(error) <= config.opening_tolerance
+            if within and settled:
+                break
+            if self.ended:
+                reason = self._ended_reason()
+            elif steps >= config.max_gripper_steps:
+                reason = "max_steps"
+            elif settled and error < 0:
+                reason = "blocked"
+            if reason is not None:
+                break
+            action, _, _ = self._pose_action(current, hold_xyz, hold.rotation)
+            action[6] = 0.0 if within else float(-np.sign(error))
+            self._step(action)
+        return ToolResult(
+            data={
+                "status": "reached" if reason is None else "partial",
+                **({} if reason is None else {"reason": reason}),
+                "env_steps": steps,
+                "opening_error": round(error, 3),
+            }
+        )

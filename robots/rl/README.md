@@ -103,7 +103,7 @@ python -m robots.rl.server serve --env maniskill --workers 1 --gpus 0 \
   --port 28567 --sam3-endpoint http://127.0.0.1:28510
 ```
 
-Use the companion RLinf task preparation command with `--maniskill-catalog robots/rl/envs/maniskill_tasks.json` and explicit seeds. The default catalog contains 25 RGB-D tasks. Four RGB-only tasks and five tasks needing additional assets are opt-in.
+Use the companion RLinf task preparation command with `--maniskill` and explicit seeds. The default catalog contains 25 RGB-D tasks. Four RGB-only tasks and five tasks needing additional assets are opt-in.
 
 ### RoboLab DROID
 
