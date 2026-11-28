@@ -183,6 +183,7 @@ class RecordedPerception:
         command: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         elapsed_s: float | None = None,
+        extras: dict[str, Any] | None = None,
     ) -> StepRecord | None:
         """Record measured state, optionally deferring RGB-D until a query."""
         state = self.robot_state()
@@ -217,7 +218,7 @@ class RecordedPerception:
             command=command,
             result=result,
             elapsed_s=elapsed_s,
-            extras={"env_steps": self.env_steps},
+            extras={"env_steps": self.env_steps, **(extras or {})},
         ) as step:
             self._state.save(
                 "step_coordinates.json", self._coordinates_metadata(), step=step

@@ -1,0 +1,2 @@
+# Run from the RPent checkout in a dedicated Linux simulator environment.
+-e .[maniskill]

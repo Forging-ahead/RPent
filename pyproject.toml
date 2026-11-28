@@ -84,6 +84,12 @@ test = [
 rlinf = [
     "rlinf @ git+https://github.com/RLinf/RLinf.git@release/v0.4",
 ]
+maniskill = [
+    "mani_skill==3.0.0b22",
+    "svgpathtools==1.8.0",
+    "opencv-python",  # RLinf in-scene task registrations import cv2.
+    "torch",
+]
 sam3 = [
     "sam3 @ git+https://github.com/RLinf/sam3.git@main",
     "einops>=0.8.0",
@@ -209,6 +215,8 @@ prerelease = "allow"
 # Each robot extra pulls a separately pinned VLA runtime whose Torch,
 # Transformers, Tokenizers, or Diffusers versions are mutually incompatible.
 conflicts = [
+    # RoboTwin and ManiSkill require different SAPIEN and MPLib versions.
+    [{ extra = "robotwin" }, { extra = "maniskill" }],
     [
         { extra = "robolab" },
         { extra = "robotwin" },
@@ -305,6 +313,7 @@ include = ["rpent*", "robots", "robots.*", "toolkits", "toolkits.*"]
 exclude = ["tests*", "docs*", "examples*", "docker*"]
 
 [tool.setuptools.package-data]
+"robots.rl" = ["prompts/*.md"]
 "robots.robodojo" = ["guides/*.md"]
 "rpent.dashboard" = ["*.html", "static/*.css", "static/*.js"]
 "robots.yam" = ["config/*.yaml", "config/*.json", "guides/*.md"]

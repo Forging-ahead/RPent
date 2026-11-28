@@ -474,7 +474,7 @@ class EpisodeConversation:
         )
 
     def validate_or_retry(
-        self, calls: Sequence[dict[str, Any]]
+        self, calls: Sequence[dict[str, Any]], *, reply_to_tools: bool = False
     ) -> tuple[str | None, str | None, dict[str, Any] | None, bool]:
         """Validate calls; append retry feedback if within retry budget.
 
@@ -488,6 +488,18 @@ class EpisodeConversation:
             return None, None, args, False
         self.output_retries += 1
         if self.output_retries <= self.max_output_retries:
-            self.messages.append(retry_message(err_msg or ""))
+            feedback = retry_message(err_msg or "")
+            if reply_to_tools:
+                # Chat Completions requires a matching result for every requested call.
+                for call in calls:
+                    self.messages.append(
+                        tool_return_message(
+                            tool_name=call["name"],
+                            tool_call_id=call["id"],
+                            text=feedback.wire[0]["content"],
+                        )
+                    )
+            else:
+                self.messages.append(feedback)
             return err_kind, err_msg, None, True
         return err_kind, err_msg, None, False

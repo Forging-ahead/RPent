@@ -56,6 +56,14 @@ simulators:
   #     MUJOCO_GL: egl
   #     PYOPENGL_PLATFORM: egl
 
+  # maniskill:
+  #   python: /path/to/envs/maniskill/bin/python
+  #   port: 28567
+  #   gpus: [4, 5, 6, 7]
+  #   workers: 8
+  #   env:
+  #     MS_ASSET_DIR: /path/to/assets/maniskill
+
   # Uncomment after following the RoboLab installation in robots/rl/README.md.
   # Export OMNI_KIT_ACCEPT_EULA=Y after accepting the NVIDIA Omniverse EULA.
   # robolab:

@@ -144,7 +144,8 @@ async def _async_recv(reader: asyncio.StreamReader) -> Any:
 
 
 def _configure_worker_gpu(environment: str, gpu: int | None) -> None:
-    if gpu is None:
+    # ManiSkill passes the assigned CUDA ordinal directly to the SAPIEN renderer.
+    if gpu is None or environment == "maniskill":
         return
     if environment in {"libero", "robocasa", "metaworld"}:
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -166,6 +167,8 @@ def _preload_simulator(environment: str, assets_path: str | None) -> None:
         import torch  # noqa: F401
 
         from robots.rl.envs import libero  # noqa: F401
+    elif environment == "maniskill":
+        import mani_skill.envs  # noqa: F401
     elif environment == "metaworld":
         os.environ.setdefault("MUJOCO_GL", "egl")
         os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
@@ -237,8 +240,19 @@ class _WorkerSessionHost:
         *,
         record_artifacts: bool = False,
         output_dir: str | None = None,
+        image_size: int = 1024,
     ):
         env_name = self.environment
+        if env_name == "maniskill":
+            from robots.rl.envs.maniskill import LocalManiSkillEnv
+
+            return LocalManiSkillEnv(
+                task_name=str(task["task_name"]),
+                seed=int(task["seed"]),
+                max_episode_steps=max_episode_steps,
+                render_device=self.gpu,
+                image_size=image_size,
+            )
         if env_name == "metaworld":
             from robots.rl.envs.metaworld import LocalMetaWorldEnv
 
@@ -418,6 +432,7 @@ class _WorkerSessionHost:
             max_episode_steps,
             record_artifacts=record_artifacts,
             output_dir=output_dir,
+            image_size=image_size,
         )
         self._env = env
         runtime_kwargs: dict[str, Any] = {
@@ -453,9 +468,7 @@ class _WorkerSessionHost:
             "tools": openai_tool_schemas(toolkit.list_tools()),
             "initial_observation": init_obs.to_text(),
             "init_state_id": init_state_id,
-            "done": toolkit.completion_result() is not None,
-            "success": bool(toolkit.solved()),
-            "truncated": bool(toolkit.truncated),
+            **toolkit.episode_status(),
         }
 
     def execute(self, req: dict[str, Any]) -> dict[str, Any]:
@@ -465,9 +478,7 @@ class _WorkerSessionHost:
         return {
             "text": result.to_text(),
             "images": [bytes(img) for img in result.images],
-            "done": self._toolkit.completion_result() is not None,
-            "success": bool(self._toolkit.solved()),
-            "truncated": bool(self._toolkit.truncated),
+            **self._toolkit.episode_status(),
             "infrastructure_error": self._toolkit.infrastructure_error,
             "sam3_service_errors": list(self._toolkit.sam3_service_errors),
         }
@@ -919,13 +930,12 @@ class SimPoolManager:
         if (
             worker.replaced
             or unavailable
-            or (at_limit and self.environment != "robolab")
+            or (at_limit and self.environment not in {"robolab", "maniskill"})
         ):
             asyncio.create_task(self._replace_worker(worker))
             return {"closed": True, "recycled": True}
         try:
-            # A healthy RoboLab worker finalizes its native recorder and
-            # episode artifacts before the application is recycled.
+            # Finalize recorded episodes before recycling a healthy worker.
             await asyncio.wait_for(worker.rpc({"op": "close"}), timeout=30.0)
             if at_limit:
                 asyncio.create_task(self._replace_worker(worker))
@@ -1423,13 +1433,22 @@ def _raise_nofile_limit(target: int = 1048576) -> None:
 
 def main() -> None:
     _raise_nofile_limit()
+    environments = (
+        "libero",
+        "robotwin",
+        "robocasa",
+        "robodojo",
+        "metaworld",
+        "robolab",
+        "maniskill",
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
 
     p_serve = sub.add_parser("serve", help="Run the HTTP warm worker pool server")
     p_serve.add_argument(
         "--env",
-        choices=("libero", "robotwin", "robocasa", "robodojo", "metaworld", "robolab"),
+        choices=environments,
         required=True,
     )
     p_serve.add_argument("--host", default="127.0.0.1")
@@ -1451,7 +1470,7 @@ def main() -> None:
     )
     p_router.add_argument(
         "--env",
-        choices=("libero", "robotwin", "robocasa", "robodojo", "metaworld", "robolab"),
+        choices=environments,
         required=True,
     )
     p_router.add_argument("--host", default="127.0.0.1")
@@ -1462,7 +1481,7 @@ def main() -> None:
     p_worker = sub.add_parser("worker", help="Internal persistent GPU worker process")
     p_worker.add_argument(
         "--env",
-        choices=("libero", "robotwin", "robocasa", "robodojo", "metaworld", "robolab"),
+        choices=environments,
         required=True,
     )
     p_worker.add_argument("--socket", required=True)

@@ -1,6 +1,6 @@
 # RPent Unified RL Simulator Layer (`robots/rl`)
 
-`robots/rl` provides a compact, uniform tool-calling interface, warm HTTP simulator pools, and standalone rollout/evaluation harness across all supported manipulation simulators (`libero`, `robotwin`, `robocasa`, `robodojo`, `metaworld`, and `robolab`).
+`robots/rl` provides a compact, uniform tool-calling interface, warm HTTP simulator pools, and standalone rollout/evaluation harness across all supported manipulation simulators (`libero`, `robotwin`, `robocasa`, `robodojo`, `metaworld`, `maniskill`, and `robolab`).
 
 ## Architecture
 
@@ -15,6 +15,7 @@ robots/rl/server.py  (FastAPI + SimPoolManager over Unix-socket warm workers)
    │     ├── libero.py           (LocalLiberoEnv + LiberoRLPrimitives)
    │     ├── robotwin.py         (LocalRoboTwinEnv + RoboTwinRLPrimitives)
    │     ├── metaworld.py        (LocalMetaWorldEnv, MetaWorldRLPrimitives)
+   │     ├── maniskill.py        (LocalManiSkillEnv, ManiSkillRLPrimitives)
    │     ├── robocasa.py         (RoboCasaRLPrimitives)
    │     ├── robodojo.py         (RoboDojoRLPrimitives)
    │     └── robolab.py          (RoboLabRLPrimitives)
@@ -84,6 +85,48 @@ python -m robots.rl.rollout \
   --max-turns 50 \
   --record-artifacts
 ```
+
+### ManiSkill
+
+The simulator worker uses RLinf's native ManiSkill environment. On a Linux host with CUDA and Vulkan, install the worker dependencies in a dedicated Python environment. Make the task catalog and environment wrapper from [RLinf #23](https://github.com/zhexuanxu/RLinf/pull/23) available to that worker:
+
+```bash
+python -m pip install -r requirements/rl-maniskill.txt
+git clone https://github.com/Forging-ahead/RLinf.git ../RLinf-maniskill
+git -C ../RLinf-maniskill checkout 54aa72645536767988ae8254bd8449773698c9e9
+export PYTHONPATH="$(cd ../RLinf-maniskill && pwd)${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+Set `MS_ASSET_DIR` to the installed ManiSkill assets and start the shared SAM3 service with its checkpoint. The worker uses this service for the `segment` tool. Enable the `maniskill` pool in `tools/rl/sim_services.example.yaml`, or start a single worker:
+
+```bash
+python -m robots.rl.server serve --env maniskill --workers 1 --gpus 0 \
+  --port 28567 --sam3-endpoint http://127.0.0.1:28510
+```
+
+To reproduce the 29-task evaluation, generate one row per evaluated task from the pinned catalog. Five additional catalog entries require separate asset packs and are outside this evaluation.
+
+```bash
+python - <<'MANIFEST' > maniskill-seed0.jsonl
+import json
+from rlinf.agents.rpent.maniskill_tasks import EVALUATED_POSE_TASKS
+
+for task in sorted(EVALUATED_POSE_TASKS):
+    print(json.dumps({"environment": "maniskill", "task_name": task, "seed": 0}))
+MANIFEST
+```
+
+In the rollout process, load the DeepSeek API key into `DEEPSEEK_API_KEY` and run:
+
+```bash
+python -m robots.rl.rollout --model-url https://api.deepseek.com \
+  --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
+  --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
+  --tasks-jsonl maniskill-seed0.jsonl --output-dir outputs/maniskill \
+  --concurrency 1 --max-turns 64 --max-tokens 4096 --record-artifacts
+```
+
+Each row starts one episode with the task's native step limit. Set `--concurrency` to the number of available workers to run independent tasks in parallel. The rollout writes per-task results to `ep_*/outcome.json` and the overall success rate to `summary.json`.
 
 ### RoboLab DROID
 

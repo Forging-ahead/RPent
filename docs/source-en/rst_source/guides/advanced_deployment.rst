@@ -211,3 +211,25 @@ In a local terminal, forward the port, replacing ``USER@HOST`` with the server l
    ssh -N -L 8000:127.0.0.1:8000 USER@HOST
 
 Open ``http://127.0.0.1:8000`` in your local browser. Keep the SSH connection and server-side RPent process running; see :doc:`dashboard` for task controls.
+
+Evaluate a ManiSkill Task
+-------------------------
+
+Use the standalone rollout client with a ManiSkill simulator pool and the SAM3
+service described above. The pool needs a CUDA/Vulkan Linux host, ManiSkill
+assets and the RLinf task catalog from the tested revision. See the
+:download:`ManiSkill section of the simulator README <../../../../robots/rl/README.md>`
+for the worker installation and the full 29-task seed-0 manifest.
+
+For a single task, write one JSON line and set the hosted model credential in
+``DEEPSEEK_API_KEY`` in the rollout process. With the pool listening on port
+28567, this command records one trajectory:
+
+.. code-block:: bash
+
+   echo '{"environment":"maniskill","task_name":"PickCube-v1","seed":0}' > task.jsonl
+   python -m robots.rl.rollout --model-url https://api.deepseek.com \
+     --model-name deepseek-flash --api-key-env DEEPSEEK_API_KEY \
+     --reasoning-effort high --image-size 512 --sim-url http://127.0.0.1:28567 \
+     --tasks-jsonl task.jsonl --output-dir outputs/maniskill \
+     --max-turns 64 --max-tokens 4096 --record-artifacts

@@ -324,15 +324,25 @@ def episode_tools(
 ) -> list[Tool]:
     """Build the centimetre-normalized tool declarations for ``environment``."""
     owner = RecordedPerception if perception is None else perception
-    batch_type = {
-        "libero": ActionBatch,
-        "metaworld": PositionActionBatch,
-        "robocasa": MobileBatch,
-        "robotwin": DualArmBatch,
-        "robodojo": DualArmBatch,
-        "robolab": ActionBatch,
-    }[environment]
-    batch = batch_type(toolkit).execute_actions
+    if environment == "maniskill":
+        from robots.rl.envs.maniskill import tool_profile
+
+        if perception is None:
+            raise ValueError(
+                "ManiSkill tool declarations require the active robot and cameras"
+            )
+        batch, camera_groups = tool_profile(toolkit, perception.tool_capabilities)
+    else:
+        batch_type = {
+            "libero": ActionBatch,
+            "metaworld": PositionActionBatch,
+            "robocasa": MobileBatch,
+            "robotwin": DualArmBatch,
+            "robodojo": DualArmBatch,
+            "robolab": ActionBatch,
+        }[environment]
+        batch = batch_type(toolkit).execute_actions
+        camera_groups = (CAMERAS[environment],) * 3
     schema = batch.input_schema
     schema["properties"]["actions"]["maxItems"] = max_actions
     batch = replace(
@@ -340,11 +350,13 @@ def episode_tools(
         _input_schema=schema,
         description=batch.description.replace("1..K", f"1..{max_actions}"),
     )
+    perception_tools = zip(
+        (owner.view_env, owner.segment, owner.back_project), camera_groups, strict=True
+    )
+    declarations = [(decl, cameras) for decl, cameras in perception_tools if cameras]
     return [
-        model_tool(
-            strict_tool(coordinate_definition(decl), cameras=CAMERAS[environment])
-        )
-        for decl in (owner.view_env, owner.segment, owner.back_project, batch)
+        model_tool(strict_tool(coordinate_definition(decl), cameras=cameras))
+        for decl, cameras in (*declarations, (batch, ()))
     ]
 
 
@@ -406,7 +418,7 @@ class RLToolkit(Toolkit):
             record_artifacts=self.record_artifacts,
             **runtime_kwargs,
         )
-        if environment == "robolab" or (
+        if environment in {"robolab", "maniskill"} or (
             environment in {"libero", "robocasa", "metaworld"}
             and image_size != NATIVE_SIZE
         ):
@@ -580,9 +592,25 @@ class RLToolkit(Toolkit):
         if self.infrastructure_error is not None:
             return {"status": "error", "reason": "infrastructure_error"}
         if self._primitives.ended:
-            success = self.solved()
-            return {"status": "completed", "success": success, "truncated": not success}
+            return {
+                "status": "completed",
+                "success": self.solved(),
+                "truncated": self.truncated,
+            }
         return None
+
+    def evaluation_metrics(self, *, success: bool | None) -> dict[str, Any]:
+        native = getattr(self._primitives, "native_outcome", None)
+        return native() if native else super().evaluation_metrics(success=success)
+
+    def episode_status(self) -> dict[str, Any]:
+        success = self.solved()
+        return {
+            "done": self.completion_result() is not None,
+            "success": success,
+            "truncated": self.truncated,
+            **self.evaluation_metrics(success=success),
+        }
 
     def close(self) -> None:
         super().close()
@@ -605,6 +633,7 @@ class RLToolkit(Toolkit):
                     "images_sent": self._images_sent,
                     "env_steps": self._primitives.env_steps,
                     "observations": self._primitives.latest_step + 1,
+                    **self.evaluation_metrics(success=None),
                 },
                 step=None,
             )

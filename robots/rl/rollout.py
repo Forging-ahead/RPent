@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ async def run_episode(
     *,
     model_url: str,
     model_name: str,
+    api_key: str | None = None,
+    reasoning_effort: str | None = None,
     sim_url: str,
     task: dict[str, Any],
     max_turns: int = 50,
@@ -57,6 +60,20 @@ async def run_episode(
     request_timeout_s: float = 600.0,
 ) -> dict[str, Any]:
     """Run one standalone episode against ``model_url`` (OpenAI chat) and ``sim_url``."""
+    model_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    model_options = (
+        {"reasoning_effort": reasoning_effort}
+        if reasoning_effort is not None
+        else {
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "chat_template_kwargs": {
+                "enable_thinking": thinking,
+                "preserve_thinking": True,
+            },
+        }
+    )
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=request_timeout_s, trust_env=False) as client:
         base_seed = task.get("seed", task.get("init_state_id"))
@@ -99,16 +116,14 @@ async def run_episode(
             environment=opened["environment"],
             compaction=compaction,
         )
-        done = bool(opened["done"])
-        success = bool(opened["success"])
-        truncated = bool(opened["truncated"])
-        reason = "success" if success else "planner_completed"
+        status = opened
+        reason = "planner_completed"
         error_kind = None
         error_msg = None
         turns = 0
 
         try:
-            while not done and turns < max_turns:
+            while not status["done"] and turns < max_turns:
                 conv.maybe_compact()
                 payload: dict[str, Any] = {
                     "model": model_name,
@@ -116,16 +131,12 @@ async def run_episode(
                     "tools": conv.tools,
                     "parallel_tool_calls": False,
                     "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "top_k": top_k,
-                    "chat_template_kwargs": {
-                        "enable_thinking": thinking,
-                        "preserve_thinking": True,
-                    },
+                    **model_options,
                 }
                 resp = await client.post(
-                    f"{model_url.rstrip('/')}/chat/completions", json=payload
+                    f"{model_url.rstrip('/')}/chat/completions",
+                    json=payload,
+                    headers=model_headers,
                 )
                 resp.raise_for_status()
                 choice = resp.json()["choices"][0]
@@ -155,7 +166,7 @@ async def run_episode(
                     for tc in tool_calls
                 ]
                 err_kind, err_msg, args, should_retry = conv.validate_or_retry(
-                    parsed_calls
+                    parsed_calls, reply_to_tools=reasoning_effort is not None
                 )
                 if err_kind is not None:
                     if should_retry:
@@ -182,30 +193,39 @@ async def run_episode(
                     text=executed["text"],
                     images=images,
                 )
-                success = bool(executed["success"])
-                truncated = bool(executed["truncated"])
-                done = bool(executed["done"])
+                status = executed
                 if executed.get("infrastructure_error"):
                     error_kind, reason = "tool_transport", "infrastructure_error"
                     error_msg = str(executed["infrastructure_error"])
                     break
             else:
-                if not done and turns >= max_turns:
+                if not status["done"] and turns >= max_turns:
                     reason = "request_limit"
-                elif success:
+                elif status["success"]:
                     reason = "success"
-                elif truncated:
+                elif status.get("terminated"):
+                    reason = (
+                        "environment_failure"
+                        if status.get("fail")
+                        else "environment_terminated"
+                    )
+                elif status["truncated"]:
                     reason = "environment_step_limit"
+                elif status["done"]:
+                    reason = "environment_terminated"
         finally:
             await client.post(f"{sim_url.rstrip('/')}/sessions/{sid}/close", json={})
 
     outcome = {
         "task": task,
         "init_state_id": opened.get("init_state_id"),
-        "success": success,
-        "truncated": truncated,
+        **{
+            key: status[key]
+            for key in ("success", "truncated", "terminated", "fail", "episode_return")
+            if key in status
+        },
         "turns": turns,
-        "termination_reason": "success" if success else reason,
+        "termination_reason": "success" if status["success"] else reason,
         "error_kind": error_kind,
         "error": error_msg,
         "elapsed_s": round(time.perf_counter() - started, 2),
@@ -220,6 +240,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-url", required=True, help="OpenAI-compatible /v1 URL")
     parser.add_argument("--model-name", default="policy")
+    parser.add_argument(
+        "--api-key-env", help="Environment variable holding the model API key"
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high"),
+        help="Use OpenAI reasoning_effort in place of local SGLang sampling options",
+    )
+    parser.add_argument(
+        "--image-size", type=int, choices=(256, 512, 1024), default=1024
+    )
     parser.add_argument("--sim-url", required=True, help="SimPoolServer HTTP base URL")
     parser.add_argument("--tasks-jsonl", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -232,6 +263,9 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--record-artifacts", action="store_true")
     args = parser.parse_args()
+    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+    if args.api_key_env and not api_key:
+        parser.error(f"Set {args.api_key_env} before starting the rollout")
 
     rows = [
         json.loads(line)
@@ -252,6 +286,9 @@ def main() -> None:
                 return await run_episode(
                     model_url=args.model_url,
                     model_name=args.model_name,
+                    api_key=api_key,
+                    reasoning_effort=args.reasoning_effort,
+                    image_size=args.image_size,
                     sim_url=args.sim_url,
                     task=task,
                     max_turns=args.max_turns,

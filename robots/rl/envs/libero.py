@@ -418,7 +418,7 @@ class LiberoRLPrimitives(RecordedPerception):
             if reason is not None:
                 break
             action, _, _ = self._pose_action(current, hold_xyz, hold.rotation)
-            action[6] = 0.0 if within else float(-np.sign(error))
+            self._command_gripper(action, opening, error, within)
             self._step(action)
         return ToolResult(
             data={
@@ -428,3 +428,6 @@ class LiberoRLPrimitives(RecordedPerception):
                 "opening_error": round(error, 3),
             }
         )
+
+    def _command_gripper(self, action, opening, error, within):
+        action[6] = 0.0 if within else float(-np.sign(error))
