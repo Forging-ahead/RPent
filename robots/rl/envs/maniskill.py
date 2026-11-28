@@ -49,7 +49,7 @@ class ToolTipBatch(ActionBatch):
 
 def _task_hint(env_id, image_size=512):
     instructions = (
-        Path(__file__).resolve().parents[1] / "prompts" / "maniskill_tasks.md"
+        Path(__file__).resolve().parents[1] / "prompts" / "maniskill_general.md"
     ).read_text(encoding="utf-8")
     section = instructions.partition(f"\n## {env_id}\n")[2].partition("\n## ")[0]
     hint = " ".join(section.split())

@@ -282,6 +282,8 @@ def system_prompt(variables: Mapping[str, object] | None = None) -> str:
     prompts = Path(__file__).parent / "prompts"
     names = ("general.md", f"{environment}_general.md", "episode.md")
     sections = [(prompts / name).read_text().strip() for name in names]
+    # Task sections belong in the active episode's instruction.
+    sections[1] = sections[1].partition("\n# Task instructions\n")[0].rstrip()
     if not variables.get("reasoning", True):
         sections[-1] = sections[-1].replace(
             "Reason briefly about the next decision using observations, not hypothetical completed actions.",
