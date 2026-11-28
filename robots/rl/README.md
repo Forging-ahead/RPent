@@ -88,7 +88,7 @@ python -m robots.rl.rollout \
 
 ### ManiSkill
 
-The simulator worker uses RLinf's native ManiSkill environment. On a Linux host with CUDA and Vulkan, install the worker dependencies in a dedicated Python environment. Make the task catalog and environment wrapper from [RLinf #23](https://github.com/zhexuanxu/RLinf/pull/23) available to that worker:
+The simulator worker uses RLinf's native ManiSkill environment. On a Linux host with CUDA and Vulkan, install the worker dependencies in a dedicated Python environment. Use the environment wrapper from the matching RLinf branch. RPent ships the task descriptions in its own catalog:
 
 ```bash
 python -m pip install -r requirements/rl-maniskill.txt

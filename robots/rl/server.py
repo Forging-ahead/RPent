@@ -144,8 +144,7 @@ async def _async_recv(reader: asyncio.StreamReader) -> Any:
 
 
 def _configure_worker_gpu(environment: str, gpu: int | None) -> None:
-    # ManiSkill passes the assigned CUDA ordinal directly to the SAPIEN renderer.
-    if gpu is None or environment == "maniskill":
+    if gpu is None:
         return
     if environment in {"libero", "robocasa", "metaworld"}:
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -250,7 +249,10 @@ class _WorkerSessionHost:
                 task_name=str(task["task_name"]),
                 seed=int(task["seed"]),
                 max_episode_steps=max_episode_steps,
-                render_device=self.gpu,
+                render_device=0
+                if self.gpu is not None
+                and os.environ.get("CUDA_VISIBLE_DEVICES") == str(self.gpu)
+                else self.gpu,
                 image_size=image_size,
             )
         if env_name == "metaworld":
@@ -935,7 +937,7 @@ class SimPoolManager:
             asyncio.create_task(self._replace_worker(worker))
             return {"closed": True, "recycled": True}
         try:
-            # Finalize recorded episodes before recycling a healthy worker.
+            # Closing the toolkit flushes state and video before worker recycling.
             await asyncio.wait_for(worker.rpc({"op": "close"}), timeout=30.0)
             if at_limit:
                 asyncio.create_task(self._replace_worker(worker))

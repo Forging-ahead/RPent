@@ -490,9 +490,11 @@ class ManiSkillJointArm(ManiSkillArm):
         first, second = [transform(link.pose)[:3, 3] for link in self.fingertips]
         wrist = transform(self.robot.links_map[palm].pose)[:3, 3]
         tcp_rotation = self._tcp()[:3, :3].T
+        jaw = first - second
+        jaw /= np.linalg.norm(jaw)
+        approach = (first + second) / 2 - wrist
         self.tool_rotation = grasp_axes(
-            tcp_rotation @ (first - second),
-            tcp_rotation @ ((first + second) / 2 - wrist),
+            tcp_rotation @ jaw, tcp_rotation @ (approach - jaw * (jaw @ approach))
         )
         self.opening_target = self._opening()
 
@@ -691,7 +693,21 @@ class ManiSkillRLPrimitives(MobileControl, RecordedPerception):
         table = getattr(getattr(native, "table_scene", None), "table", None)
         mesh = table.get_first_collision_mesh() if table is not None else None
         self.surface_kind = "table" if mesh is not None else "floor"
-        if mesh is None:
+        if mesh is None and "arena" in native.scene.actors:
+            # Bridge builds its table and backdrop as one collision mesh.
+            mount = transform(next(iter(self.arms.values())).mount.pose)
+            for offset in ([0.15, 0.1, 0.3], [0.15, -0.1, 0.3], [0, 0.15, 0.3]):
+                origin = mount[:3, 3] + mount[:3, :3] @ offset
+                hit = native.scene.px.raycast(origin, [0, 0, -1], 2.0)
+                if (
+                    hit
+                    and hit.component.entity == native.scene.actors["arena"]._objs[0]
+                ):
+                    self.surface_kind, self.surface = "table", hit.position
+                    break
+            else:
+                raise ValueError(f"Could not measure the table in {self.env_id}")
+        elif mesh is None:
             ground = getattr(native, "ground", None)
             if ground is None:
                 ground = native.scene.actors.get("ground")
