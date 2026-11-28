@@ -73,12 +73,12 @@ to turn as the shoulder pans. Use the goal for this first lift and maintain the 
 
 ## PickCubeWidowXAI-v1
 
-The reset jaw gap already spans the red cube. Measure cube and goal, then send a batch with move_to(cube
-footprint center at table+1.9 cm, XYZ only) and set_gripper(opening=0.30). This keeps a small preload on the
-3.6 cm cube and avoids squeezing it at maximum effort; leave the gap at 0.30 throughout delivery.
-Immediately carry diagonally to the measured sphere center, biased 0.5 cm toward the base, plus measured
-grasp offset. Use roll = measured closing roll minus 0.20 rad, same pitch and yaw. Hold at the goal so the
-wrist joint can settle.
+Measure the red cube and green sphere in the reset view. The open jaws already clear the table. Use three
+physical commands: (1) move straight from reset to the cube mask's reported XY at table + 1.9 cm, XYZ only;
+(2) close to 0.30; (3) carry diagonally to the sphere in one move. The first target is the grasp itself,
+and the carry is the lift. A partial close with a measured gap above 0.30 is expected on contact. Use the
+measured sphere center, biased 0.5 cm toward the base, plus the measured TCP-minus-cube offset at grasp.
+Set carry roll to the measured closing roll minus 0.20 rad, keeping pitch and yaw. Keep holding at arrival.
 
 ## PickSingleYCB-v1
 
@@ -91,11 +91,11 @@ the object center rises relative to the grasp. Keep holding.
 
 ## PlaceSphere-v1
 
-From the initial base view, segment sphere and bin. Back-project the sphere mask's top 1 cm (z_range_cm); its XY
-is the grasp XY. Use exactly that XY. The equator is halfway between table height and sphere top. From the clear
-start batch move_to(equator) and close fully. After contact, batch one diagonal carry to the bin mask's XY at
-bin rim top + sphere radius + 0.3 cm and open fully. If the ball is in the bin and the episode continues, hold
-the wrist still with the open-gripper target.
+Measure the sphere and shallow bin before moving. Back-project the top 1 cm of the sphere mask for grasp XY;
+the equator is halfway between tabletop and sphere top. The reset pose is the approach waypoint. Use two
+batches: [move_to(equator XYZ directly), set_gripper(0)] then [move_to(bin center XY, rim top + sphere
+radius + 0.3 cm), set_gripper(1)]. Keep measured wrist orientation. A partial close on the ball is contact.
+The diagonal carry supplies the lift. Reserve the final 10 native steps for opening and settling in the bin.
 
 ## PlugCharger-v1
 
@@ -118,8 +118,11 @@ the grip and wrist still to settle.
 
 ## PullCube-v1
 
-Keep the measured downward wrist orientation throughout the pickup and pull. Descend to the visible cube, close
-and lift slightly. Pull toward the goal along the cube-to-goal line without a separate wrist turn.
+Measure the blue cube and bullseye in the base view. Keep the reset wrist and grasp at the cube mask's XY,
+about two-thirds of the cube height above the table, then close fully. Lift to table + 8 cm. From this
+lifted pose, pull diagonally toward the bullseye in the very next move, ending 2 cm inside the near edge
+of its 10 cm radius at table + 5.5 cm. Keep holding. Success is measured in XY as the cube enters the
+circle, so a separate descent to the table or release spends steps needed for the pull.
 
 ## PullCubeTool-v1
 
